@@ -23,8 +23,8 @@ when auth expires, the web backend changes, or a stream is interrupted.
 From source:
 
 ```sh
-git clone https://github.com/ratacat/pro-query
-cd pro-query
+git clone https://github.com/ratacat/pro-cli
+cd pro-cli
 bun install
 bun link
 pro setup
