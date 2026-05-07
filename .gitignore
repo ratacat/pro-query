@@ -8,6 +8,7 @@ node_modules/
 dist/
 coverage/
 .pro/
+.liquid-mail/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

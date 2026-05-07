@@ -27,6 +27,19 @@ export interface AuthStatus {
   rawValuesPrinted: false;
 }
 
+export type BrowserSessionState = "present" | "logged_out" | "page_missing" | "cdp_unavailable";
+
+export interface BrowserSessionStatus {
+  status: BrowserSessionState;
+  cdpBase: string;
+  httpStatus?: number;
+  pageOrigin?: string;
+  errorCode?: string;
+  message?: string;
+  suggestions: string[];
+  rawValuesPrinted: false;
+}
+
 export async function getAuthStatus(paths: RuntimePaths): Promise<AuthStatus> {
   try {
     await access(paths.cookieJsonPath);
@@ -60,6 +73,98 @@ export async function getAuthStatus(paths: RuntimePaths): Promise<AuthStatus> {
     names: summary.names,
     rawValuesPrinted: false,
   };
+}
+
+export async function getBrowserSessionStatus(
+  cdpBase: string,
+  timeoutMs = 3_000,
+): Promise<BrowserSessionStatus> {
+  try {
+    const result = await evaluateInCdpPage<{
+      status: number;
+      hasAccessToken: boolean;
+      origin: string;
+      code?: "CHATGPT_PAGE_MISSING";
+    }>(
+      cdpBase,
+      `(async () => {
+        if (location.origin !== "https://chatgpt.com") {
+          return {
+            status: 0,
+            hasAccessToken: false,
+            origin: location.origin,
+            code: "CHATGPT_PAGE_MISSING"
+          };
+        }
+        const res = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
+        const json = await res.json().catch(() => null);
+        return {
+          status: res.status,
+          hasAccessToken: typeof json?.accessToken === "string" && json.accessToken.length > 0,
+          origin: location.origin
+        };
+      })()`,
+      timeoutMs,
+    );
+
+    if (result?.code === "CHATGPT_PAGE_MISSING") {
+      return {
+        status: "page_missing",
+        cdpBase,
+        httpStatus: result.status,
+        pageOrigin: result.origin,
+        suggestions: [
+          "Open the Chrome command from pro auth command.",
+          "Confirm the CDP tab is on https://chatgpt.com/.",
+        ],
+        rawValuesPrinted: false,
+      };
+    }
+
+    if (result?.hasAccessToken) {
+      return {
+        status: "present",
+        cdpBase,
+        httpStatus: result.status,
+        pageOrigin: result.origin,
+        suggestions: [],
+        rawValuesPrinted: false,
+      };
+    }
+
+    return {
+      status: "logged_out",
+      cdpBase,
+      httpStatus: result?.status,
+      pageOrigin: result?.origin,
+      suggestions: [
+        "Sign in to ChatGPT in the CDP Chrome window.",
+        `Run pro auth capture --cdp ${cdpBase} --json after login.`,
+      ],
+      rawValuesPrinted: false,
+    };
+  } catch (error) {
+    const proError = error instanceof ProError ? error : null;
+    if (proError?.code === "CHATGPT_PAGE_MISSING") {
+      return {
+        status: "page_missing",
+        cdpBase,
+        errorCode: proError.code,
+        message: proError.message,
+        suggestions: proError.suggestions,
+        rawValuesPrinted: false,
+      };
+    }
+    return {
+      status: "cdp_unavailable",
+      cdpBase,
+      errorCode: proError?.code ?? "CDP_UNAVAILABLE",
+      message: error instanceof Error ? error.message : String(error),
+      suggestions:
+        proError?.suggestions.length ? proError.suggestions : ["Open Chrome with remote debugging enabled."],
+      rawValuesPrinted: false,
+    };
+  }
 }
 
 export interface CaptureOptions {

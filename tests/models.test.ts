@@ -58,7 +58,11 @@ describe("model discovery", () => {
               max_tokens: 272000,
               reasoning_type: "reasoning",
               configurable_thinking_effort: true,
-              thinking_efforts: ["low", "medium", "high"],
+              thinking_efforts: [
+                { thinking_effort: "min", short_label: "Light" },
+                { thinking_effort: "standard", short_label: "Standard" },
+                { thinking_effort: "max", short_label: "Heavy" },
+              ],
               enabled_tools: [{ type: "python" }, { type: "web" }],
             },
           ],
@@ -77,7 +81,7 @@ describe("model discovery", () => {
         label: "GPT-5.5",
         default: true,
         maxTokens: 272000,
-        reasoningLevels: ["low", "medium", "high"],
+        reasoningLevels: ["min", "standard", "max"],
         enabledTools: ["python", "web"],
       });
     });

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import packageJson from "../package.json" with { type: "json" };
 import { flagBoolean, flagString, parseArgs } from "./args";
-import { captureAuth, defaultCdpBase, getAuthStatus } from "./auth";
+import { captureAuth, defaultCdpBase, getAuthStatus, getBrowserSessionStatus } from "./auth";
 import { loadConfig, resolvePaths, saveConfig } from "./config";
 import { EXIT, ProError, toProError } from "./errors";
 import { JobStore, redactJob } from "./jobs";
@@ -13,6 +13,8 @@ import { listModels } from "./models";
 import type { CliIO } from "./output";
 import { writeError, writeSuccess } from "./output";
 import { runChatGptJob } from "./transport";
+
+const REASONING_LEVELS = ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
 
 const HELP_TEXT =
   "pro: ChatGPT Pro CLI\nsetup, auth command, auth capture, auth status, models, run, submit, wait, result, jobs, doctor\nUse --json for agents.";
@@ -93,7 +95,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           const job = store.create({
             prompt,
             model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
-            reasoning: flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto",
+            reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
             options: await collectSubmitOptions(parsed.flags, io.cwd),
           });
           const workerStarted = !flagBoolean(parsed.flags, "no-start");
@@ -111,7 +113,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           const created = store.create({
             prompt,
             model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
-            reasoning: flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto",
+            reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
             options: await collectSubmitOptions(parsed.flags, io.cwd),
           });
           const executed = await executeQueuedJob(store, created.id, paths);
@@ -217,7 +219,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           if (!key || !value) throw invalidArgs("Missing config key/value.", ["Use pro config set model auto."]);
           const next = { ...config };
           if (key === "model") next.defaultModel = value;
-          else if (key === "reasoning") next.defaultReasoning = value;
+          else if (key === "reasoning") next.defaultReasoning = resolveReasoning(value);
           else throw invalidArgs(`Unknown config key ${key}.`, ["Supported keys: model, reasoning."]);
           await saveConfig(io.env, next);
           writeSuccess(io, mode, { config: next });
@@ -227,23 +229,22 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "doctor": {
         const auth = await getAuthStatus(paths);
-        const ready = auth.tokenStatus === "present" && auth.accountIdPresent;
+        const cdpBase = defaultCdpBase(flagString(parsed.flags, "port"), flagString(parsed.flags, "cdp"));
+        const browserSession = await getBrowserSessionStatus(
+          cdpBase,
+          parseIntegerFlag(parsed.flags, "timeout", 3_000, 1, 60_000),
+        );
+        const authReady = auth.tokenStatus === "present" && auth.accountIdPresent;
+        const ready = authReady && browserSession.status === "present";
         writeSuccess(io, mode, {
           auth,
+          browserSession,
           ready,
-          next: ready
-            ? {
-                command: 'pro run "Reply with OK only." --cdp http://127.0.0.1:9222 --json',
-                reason: "Auth is present; run a smoke query.",
-              }
-            : {
-                command: "pro setup --json",
-                reason: "Auth is missing or expired; follow the setup steps.",
-              },
+          next: buildDoctorNext(authReady, browserSession.status, cdpBase),
           storage: { home: paths.home, dbPath: paths.dbPath },
           transport: {
             status: ready ? "configured" : "auth_required",
-            endpoint: "https://chatgpt.com/backend-api/conversation",
+            endpoint: "https://chatgpt.com/backend-api/f/conversation",
           },
           safety: safetySummary(),
         });
@@ -280,6 +281,35 @@ function commandList(): string[] {
     "config get",
     "doctor",
   ];
+}
+
+function buildDoctorNext(
+  authReady: boolean,
+  browserStatus: Awaited<ReturnType<typeof getBrowserSessionStatus>>["status"],
+  cdpBase: string,
+): Record<string, string> {
+  if (authReady && browserStatus === "present") {
+    return {
+      command: `pro run "Reply with OK only." --cdp ${cdpBase} --json`,
+      reason: "Stored auth and the live CDP ChatGPT page are ready; run a smoke query.",
+    };
+  }
+  if (authReady && browserStatus === "logged_out") {
+    return {
+      command: `pro auth capture --cdp ${cdpBase} --json`,
+      reason: "The CDP ChatGPT page is reachable but logged out; sign in there, then recapture auth.",
+    };
+  }
+  if (authReady && (browserStatus === "page_missing" || browserStatus === "cdp_unavailable")) {
+    return {
+      command: "pro auth command --json",
+      reason: "Stored auth exists, but no live ChatGPT CDP page is available.",
+    };
+  }
+  return {
+    command: "pro setup --json",
+    reason: "Auth is missing or expired; follow the setup steps.",
+  };
 }
 
 function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: string, port: string): Record<string, unknown> {
@@ -381,7 +411,7 @@ async function collectSubmitOptions(
   setIntegerOption(options, "retries", flags, "retries", 0, 5);
   setIntegerOption(options, "retryDelayMs", flags, "retry-delay", 0, 60_000);
   setBooleanOption(options, "parallelTools", flags, "parallel-tools");
-  setBooleanOption(options, "store", flags, "store");
+  setConversationOptions(options, flags);
   const cdp = flagString(flags, "cdp");
   const port = flagString(flags, "port");
   if (cdp || port) options.cdpBase = defaultCdpBase(port, cdp);
@@ -415,10 +445,48 @@ const SUBMIT_FLAGS = new Set([
   "retries",
   "retry-delay",
   "store",
+  "save",
+  "temporary",
+  "no-temporary",
+  "conversation",
+  "parent",
   "no-start",
   "cdp",
   "port",
 ]);
+
+function setConversationOptions(
+  options: Record<string, unknown>,
+  flags: Map<string, string | boolean | string[]>,
+): void {
+  const conversationId = flagString(flags, "conversation");
+  const parentMessageId = flagString(flags, "parent");
+  if (conversationId || parentMessageId) {
+    if (!conversationId || !parentMessageId) {
+      throw invalidArgs("Continuing a conversation needs both ids.", [
+        "Use --conversation <conversation-id> --parent <message-id>.",
+      ]);
+    }
+    options.conversationId = conversationId;
+    options.parentMessageId = parentMessageId;
+  }
+
+  const store = readBooleanFlag(flags, "store");
+  const save = flagBoolean(flags, "save") || flagBoolean(flags, "no-temporary") || store === true;
+  const temporary = flagBoolean(flags, "temporary") || store === false;
+  if (save && temporary) {
+    throw invalidArgs("Choose either temporary or saved chat mode.", [
+      "Use --temporary for a temporary chat or --save for a saved conversation.",
+    ]);
+  }
+
+  options.temporary = temporary || (!save && !conversationId);
+}
+
+function resolveReasoning(reasoning: string): string {
+  if (REASONING_LEVELS.includes(reasoning)) return reasoning;
+  throw invalidArgs("Invalid --reasoning.", [`Allowed values: ${REASONING_LEVELS.join(", ")}.`]);
+}
 
 function rejectUnsupportedFlags(
   flags: Map<string, string | boolean | string[]>,
@@ -544,15 +612,22 @@ function setBooleanOption(
   flags: Map<string, string | boolean | string[]>,
   source: string,
 ): void {
+  const parsed = readBooleanFlag(flags, source);
+  if (parsed === undefined) return;
+  options[target] = parsed;
+}
+
+function readBooleanFlag(
+  flags: Map<string, string | boolean | string[]>,
+  source: string,
+): boolean | undefined {
   const value = flagString(flags, source);
-  if (value === undefined) return;
+  if (value === undefined) return undefined;
   if (["true", "1", "yes", "on"].includes(value.toLowerCase())) {
-    options[target] = true;
-    return;
+    return true;
   }
   if (["false", "0", "no", "off"].includes(value.toLowerCase())) {
-    options[target] = false;
-    return;
+    return false;
   }
   throw invalidArgs(`Invalid --${source}.`, ["Use true or false."]);
 }

@@ -4,7 +4,7 @@ import { EXIT, ProError } from "./errors";
 import type { JobRecord } from "./jobs";
 import { isTokenFresh, loadSessionToken } from "./session-token";
 
-const CHATGPT_CONVERSATION_ENDPOINT = "https://chatgpt.com/backend-api/conversation";
+const CHATGPT_CONVERSATION_ENDPOINT = "https://chatgpt.com/backend-api/f/conversation";
 const DEFAULT_CDP_BASE = "http://127.0.0.1:9222";
 
 type PageEvaluator = <T>(cdpBase: string, expression: string, timeoutMs?: number) => Promise<T>;
@@ -147,58 +147,712 @@ function buildBrowserFetchExpression(requestBody: Record<string, unknown>, accou
       };
     }
 
-    const headers: Record<string, string> = {
-      accept: "text/event-stream",
-      authorization: `Bearer ${session.accessToken}`,
-      "content-type": "application/json",
-      "oai-language": navigator.language || "en-US",
-      originator: "pro-cli",
+    const accessToken = session.accessToken;
+    const turnTraceId = crypto.randomUUID();
+    const requestBody = withBrowserContext(body);
+    const referrer = chatReferrer(requestBody);
+    const prepareBody = buildPrepareBody(requestBody);
+    const prepareResponse = await fetch("https://chatgpt.com/backend-api/f/conversation/prepare", {
+      method: "POST",
+      credentials: "include",
+      referrer,
+      headers: appHeaders("/f/conversation/prepare", accessToken, {
+        "x-conduit-token": "no-token",
+        "x-oai-turn-trace-id": turnTraceId,
+      }),
+      body: JSON.stringify(prepareBody),
+    });
+    const preparedConversation = (await prepareResponse.json().catch(() => null)) as
+      | { conduit_token?: unknown }
+      | null;
+    const conduitToken =
+      prepareResponse.ok && typeof preparedConversation?.conduit_token === "string"
+        ? preparedConversation.conduit_token
+        : null;
+
+    const headers = {
+      ...appHeaders("/f/conversation", accessToken, {
+        accept: "text/event-stream",
+        "x-oai-turn-trace-id": turnTraceId,
+        ...(conduitToken ? { "x-conduit-token": conduitToken } : {}),
+      }),
+      ...(await chatRequirementsHeaders(accessToken, referrer)),
     };
-    if (account) headers["chatgpt-account-id"] = account;
 
     const response = await fetch(endpoint, {
       method: "POST",
       credentials: "include",
+      referrer,
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...requestBody, client_prepare_state: prepareResponse.ok ? "sent" : "none" }),
     });
-    const text = await response.text().catch((error) => String(error));
+    let text = await response.text().catch((error) => String(error));
+    if (response.ok) {
+      const resumedText = await resumeHandoffStream(text, accessToken, turnTraceId, referrer);
+      if (resumedText) text = `${text}\n\n${resumedText}`;
+    }
     return { ok: response.ok, status: response.status, body: text };
+
+    function appHeaders(
+      routeName: string,
+      accessToken: string,
+      extraHeaders: Record<string, string> = {},
+    ): Record<string, string> {
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+        "oai-language": navigator.language || "en-US",
+        "OAI-Client-Version": document.documentElement.getAttribute("data-build") ?? "",
+        "OAI-Client-Build-Number": document.documentElement.getAttribute("data-seq") ?? "",
+        "OAI-Device-Id": readJsonString(localStorage.getItem("oai-did")) ?? readCookie("oai-did") ?? "",
+        "OAI-Session-Id": readSessionId(),
+        "X-OpenAI-Target-Path": `/backend-api${routeName}`,
+        "X-OpenAI-Target-Route": `/backend-api${routeName}`,
+        ...extraHeaders,
+      };
+      const integrityState = readCookie("__Secure-oai-is");
+      if (integrityState) headers["X-OAI-IS"] = integrityState;
+      return Object.fromEntries(Object.entries(headers).filter(([, value]) => value.length > 0));
+    }
+
+    function buildPrepareBody(body: Record<string, unknown>): Record<string, unknown> {
+      const messages = Array.isArray(body.messages) ? body.messages : [];
+      const firstMessage = messages[0] as {
+        id?: unknown;
+        author?: unknown;
+        content?: { parts?: unknown };
+      } | undefined;
+      const partialQuery = firstMessage
+        ? {
+            id: firstMessage.id,
+            author: firstMessage.author,
+            content: {
+              ...(firstMessage.content ?? {}),
+              parts: Array.isArray(firstMessage.content?.parts) ? firstMessage.content.parts : [],
+            },
+          }
+        : undefined;
+      const {
+        messages: _messages,
+        enable_message_followups: _followups,
+        paragen_cot_summary_display_override: _paragen,
+        force_parallel_switch: _parallel,
+        ...prepareBody
+      } = body;
+      return {
+        ...prepareBody,
+        fork_from_shared_post: false,
+        partial_query: partialQuery,
+        client_prepare_state: "none",
+        client_contextual_info: { app_name: appNameFor(body) },
+      };
+    }
+
+    function withBrowserContext(body: Record<string, unknown>): Record<string, unknown> {
+      return {
+        ...body,
+        timezone_offset_min: new Date().getTimezoneOffset(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        client_contextual_info: {
+          is_dark_mode: matchMedia?.("(prefers-color-scheme: dark)")?.matches ?? false,
+          time_since_loaded: Math.round(performance.now()),
+          page_height: document.documentElement.scrollHeight,
+          page_width: document.documentElement.scrollWidth,
+          pixel_ratio: window.devicePixelRatio,
+          screen_height: screen.height,
+          screen_width: screen.width,
+          app_name: appNameFor(body),
+        },
+      };
+    }
+
+    function appNameFor(body: Record<string, unknown>): string {
+      return body.history_and_training_disabled === true ? "chatgpt.com" : "chatgpt";
+    }
+
+    function chatReferrer(body: Record<string, unknown>): string {
+      return body.history_and_training_disabled === true
+        ? "https://chatgpt.com/?temporary-chat=true"
+        : "https://chatgpt.com/";
+    }
+
+    async function resumeHandoffStream(
+      streamText: string,
+      accessToken: string,
+      turnTraceId: string,
+      referrer: string,
+    ): Promise<string | null> {
+      const handoff = readHandoff(streamText);
+      if (!handoff) return null;
+      for (const offset of [0, 1, 2]) {
+        const resumeResponse = await fetch("https://chatgpt.com/backend-api/f/conversation/resume", {
+          method: "POST",
+          credentials: "include",
+          referrer,
+          headers: appHeaders("/f/conversation/resume", accessToken, {
+            accept: "text/event-stream",
+            "x-conduit-token": handoff.token,
+            "x-oai-turn-trace-id": turnTraceId,
+          }),
+          body: JSON.stringify({ conversation_id: handoff.conversationId, offset }),
+        });
+        const resumeText = await resumeResponse.text().catch(() => "");
+        if (resumeResponse.ok && resumeText.trim()) return resumeText;
+        if (resumeResponse.status !== 404) return null;
+      }
+      return null;
+    }
+
+    function readHandoff(streamText: string): { conversationId: string; token: string } | null {
+      let conversationId: string | null = null;
+      let token: string | null = null;
+      for (const event of readSseJsonEvents(streamText)) {
+        if (!event || typeof event !== "object") continue;
+        const record = event as { type?: unknown; conversation_id?: unknown; token?: unknown };
+        if (record.type === "resume_conversation_token") {
+          if (typeof record.conversation_id === "string") conversationId = record.conversation_id;
+          if (typeof record.token === "string") token = record.token;
+        }
+        if (record.type === "stream_handoff" && typeof record.conversation_id === "string") {
+          conversationId = record.conversation_id;
+        }
+      }
+      return conversationId && token ? { conversationId, token } : null;
+    }
+
+    function readSseJsonEvents(streamText: string): unknown[] {
+      return streamText
+        .split("\n\n")
+        .flatMap((frame) => {
+          const data = frame
+            .split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim())
+            .join("\n");
+          if (!data || data === "[DONE]") return [];
+          try {
+            return [JSON.parse(data) as unknown];
+          } catch {
+            return [];
+          }
+        });
+    }
+
+    function readCookie(name: string): string | null {
+      const prefix = `${name}=`;
+      const cookie = document.cookie
+        .split("; ")
+        .find((item) => item.startsWith(prefix));
+      return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : null;
+    }
+
+    function readJsonString(value: string | null): string | null {
+      if (!value) return null;
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        return typeof parsed === "string" ? parsed : null;
+      } catch {
+        return value;
+      }
+    }
+
+    function readSessionId(): string {
+      const bootstrap = (window as unknown as { CLIENT_BOOTSTRAP?: { sessionId?: unknown } }).CLIENT_BOOTSTRAP;
+      if (typeof bootstrap?.sessionId === "string" && bootstrap.sessionId) return bootstrap.sessionId;
+      const statsigKey = Object.keys(localStorage).find((key) => key.startsWith("statsig.session_id."));
+      if (statsigKey) {
+        try {
+          const statsig = JSON.parse(localStorage.getItem(statsigKey) ?? "{}") as { sessionID?: unknown };
+          if (typeof statsig.sessionID === "string" && statsig.sessionID) return statsig.sessionID;
+        } catch {
+          // Ignore malformed local client telemetry state.
+        }
+      }
+      return crypto.randomUUID();
+    }
+
+    async function chatRequirementsHeaders(accessToken: string, referrer: string): Promise<Record<string, string>> {
+      const requirementsToken = buildRequirementsToken();
+      const prepareResponse = await fetch(
+        "https://chatgpt.com/backend-api/sentinel/chat-requirements/prepare",
+        {
+          method: "POST",
+          credentials: "include",
+          referrer,
+          headers: appHeaders("/sentinel/chat-requirements/prepare", accessToken),
+          body: JSON.stringify({ p: requirementsToken }),
+        },
+      );
+      const prepared = (await prepareResponse.json().catch(() => null)) as PreparedChatRequirements | null;
+      if (!prepareResponse.ok || !prepared) {
+        return {};
+      }
+
+      const finalizeBody: Record<string, string> = {
+        prepare_token: typeof prepared.prepare_token === "string" ? prepared.prepare_token : "",
+      };
+      const proofToken = buildProofToken(prepared);
+      if (proofToken) finalizeBody.proofofwork = proofToken;
+      const turnstileToken = await buildTurnstileToken(prepared, requirementsToken);
+      if (turnstileToken) finalizeBody.turnstile = turnstileToken;
+
+      const finalizeResponse = await fetch(
+        "https://chatgpt.com/backend-api/sentinel/chat-requirements/finalize",
+        {
+          method: "POST",
+          credentials: "include",
+          referrer,
+          headers: appHeaders("/sentinel/chat-requirements/finalize", accessToken),
+          body: JSON.stringify(finalizeBody),
+        },
+      );
+      const finalized = (await finalizeResponse.json().catch(() => null)) as
+        | { token?: unknown }
+        | null;
+      if (!finalizeResponse.ok || typeof finalized?.token !== "string" || !finalized.token) {
+        return {};
+      }
+
+      const headers: Record<string, string> = {
+        "OpenAI-Sentinel-Chat-Requirements-Token": finalized.token,
+      };
+      if (proofToken) headers["OpenAI-Sentinel-Proof-Token"] = proofToken;
+      if (turnstileToken) headers["OpenAI-Sentinel-Turnstile-Token"] = turnstileToken;
+      const timing = sentinelTiming();
+      if (timing) headers["OAI-Telemetry"] = timing;
+      return headers;
+    }
+
+    function buildRequirementsToken(): string {
+      return `gAAAAAC${generateRequirementsTokenAnswer()}`;
+    }
+
+    function buildProofToken(prepared: PreparedChatRequirements): string | null {
+      const proof = prepared.proofofwork;
+      if (!proof?.required) return null;
+      if (typeof proof.seed !== "string" || typeof proof.difficulty !== "string") return null;
+      return `gAAAAAB${generateProofAnswer(proof.seed, proof.difficulty)}`;
+    }
+
+    async function buildTurnstileToken(
+      prepared: PreparedChatRequirements,
+      requirementsToken: string,
+    ): Promise<string | null> {
+      const turnstile = prepared.turnstile;
+      if (!turnstile?.required) return null;
+      if (typeof turnstile.dx === "string" && turnstile.dx) {
+        return await runDxProgram(requirementsToken, turnstile.dx).catch(() => null);
+      }
+      return null;
+    }
+
+    function sentinelTiming(): string | null {
+      try {
+        const sentinel = (window as unknown as { SentinelSDK?: { timing?: () => unknown } }).SentinelSDK;
+        const timing = sentinel?.timing?.();
+        return typeof timing === "string" ? timing : null;
+      } catch {
+        return null;
+      }
+    }
+
+    async function runDxProgram(secret: string, dx: string): Promise<string> {
+      const opXorAsync = 0;
+      const opXor = 1;
+      const opSet = 2;
+      const opResolve = 3;
+      const opReject = 4;
+      const opAppend = 5;
+      const opIndex = 6;
+      const opCall = 7;
+      const opCopy = 8;
+      const opQueue = 9;
+      const opWindow = 10;
+      const opScriptMatch = 11;
+      const opMap = 12;
+      const opSafeCall = 13;
+      const opJsonParse = 14;
+      const opJsonStringify = 15;
+      const opSecret = 16;
+      const opCallSet = 17;
+      const opAtob = 18;
+      const opBtoa = 19;
+      const opEqualsBranch = 20;
+      const opDeltaBranch = 21;
+      const opSubroutine = 22;
+      const opIfDefined = 23;
+      const opBind = 24;
+      const opNoopA = 25;
+      const opNoopB = 26;
+      const opRemove = 27;
+      const opNoopC = 28;
+      const opLessThan = 29;
+      const opDefineFunction = 30;
+      const opMultiply = 33;
+      const opAwait = 34;
+      const opDivide = 35;
+      const values = new Map<number, unknown>();
+      let steps = 0;
+      let chain = Promise.resolve();
+
+      function serialize<T>(work: () => Promise<T> | T): Promise<T> {
+        const next = chain.then(work, work);
+        chain = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        return next;
+      }
+
+      async function runQueue(): Promise<void> {
+        const queue = values.get(opQueue) as unknown[][];
+        while (Array.isArray(queue) && queue.length > 0) {
+          const [opcode, ...args] = queue.shift() ?? [];
+          const handler = values.get(Number(opcode)) as ((...args: unknown[]) => unknown) | undefined;
+          const result = handler?.(...args);
+          if (result && typeof (result as Promise<unknown>).then === "function") await result;
+          steps += 1;
+        }
+      }
+
+      function xor(value: string, key: string): string {
+        let output = "";
+        for (let index = 0; index < value.length; index += 1) {
+          output += String.fromCharCode(value.charCodeAt(index) ^ key.charCodeAt(index % key.length));
+        }
+        return output;
+      }
+
+      function resetVm(): void {
+        values.clear();
+        values.set(opXorAsync, (program: unknown) => runDxProgram(String(values.get(Number(program))), secret));
+        values.set(opXor, (target: unknown, key: unknown) =>
+          values.set(Number(target), xor(String(values.get(Number(target))), String(values.get(Number(key))))),
+        );
+        values.set(opSet, (target: unknown, value: unknown) => values.set(Number(target), value));
+        values.set(opAppend, (target: unknown, source: unknown) => {
+          const current = values.get(Number(target));
+          const next = values.get(Number(source));
+          if (Array.isArray(current)) current.push(next);
+          else values.set(Number(target), String(current) + String(next));
+        });
+        values.set(opRemove, (target: unknown, source: unknown) => {
+          const current = values.get(Number(target));
+          const next = values.get(Number(source));
+          if (Array.isArray(current)) current.splice(current.indexOf(next), 1);
+          else values.set(Number(target), Number(current) - Number(next));
+        });
+        values.set(opLessThan, (target: unknown, left: unknown, right: unknown) =>
+          values.set(Number(target), Number(values.get(Number(left))) < Number(values.get(Number(right)))),
+        );
+        values.set(opMultiply, (target: unknown, left: unknown, right: unknown) =>
+          values.set(Number(target), Number(values.get(Number(left))) * Number(values.get(Number(right)))),
+        );
+        values.set(opDivide, (target: unknown, left: unknown, right: unknown) => {
+          const divisor = Number(values.get(Number(right)));
+          values.set(Number(target), divisor === 0 ? 0 : Number(values.get(Number(left))) / divisor);
+        });
+        values.set(opIndex, (target: unknown, source: unknown, key: unknown) =>
+          values.set(Number(target), (values.get(Number(source)) as Record<string, unknown>)[String(values.get(Number(key)))]),
+        );
+        values.set(opCall, (fn: unknown, ...args: unknown[]) =>
+          (values.get(Number(fn)) as (...args: unknown[]) => unknown)(...args.map((arg) => values.get(Number(arg)))),
+        );
+        values.set(opCallSet, (target: unknown, fn: unknown, ...args: unknown[]) => {
+          try {
+            const result = (values.get(Number(fn)) as (...args: unknown[]) => unknown)(
+              ...args.map((arg) => values.get(Number(arg))),
+            );
+            if (result && typeof (result as Promise<unknown>).then === "function") {
+              return (result as Promise<unknown>)
+                .then((value) => values.set(Number(target), value))
+                .catch((error) => values.set(Number(target), String(error)));
+            }
+            values.set(Number(target), result);
+          } catch (error) {
+            values.set(Number(target), String(error));
+          }
+        });
+        values.set(opSafeCall, (target: unknown, fn: unknown, ...args: unknown[]) => {
+          try {
+            (values.get(Number(fn)) as (...args: unknown[]) => unknown)(...args.map((arg) => values.get(Number(arg))));
+          } catch (error) {
+            values.set(Number(target), String(error));
+          }
+        });
+        values.set(opCopy, (target: unknown, source: unknown) => values.set(Number(target), values.get(Number(source))));
+        values.set(opWindow, window);
+        values.set(opScriptMatch, (target: unknown, pattern: unknown) =>
+          values.set(
+            Number(target),
+            (Array.from(document.scripts || [])
+              .map((script) => script?.src?.match(String(values.get(Number(pattern)))))
+              .filter((match) => match?.length)[0] ?? [])[0] ?? null,
+          ),
+        );
+        values.set(opMap, (target: unknown) => values.set(Number(target), values));
+        values.set(opJsonParse, (target: unknown, source: unknown) =>
+          values.set(Number(target), JSON.parse(String(values.get(Number(source))))),
+        );
+        values.set(opJsonStringify, (target: unknown, source: unknown) =>
+          values.set(Number(target), JSON.stringify(values.get(Number(source)))),
+        );
+        values.set(opAtob, (target: unknown) => values.set(Number(target), atob(String(values.get(Number(target))))));
+        values.set(opBtoa, (target: unknown) => values.set(Number(target), btoa(String(values.get(Number(target))))));
+        values.set(opEqualsBranch, (left: unknown, right: unknown, fn: unknown, ...args: unknown[]) =>
+          values.get(Number(left)) === values.get(Number(right))
+            ? (values.get(Number(fn)) as (...args: unknown[]) => unknown)(...args)
+            : null,
+        );
+        values.set(opDeltaBranch, (left: unknown, right: unknown, threshold: unknown, fn: unknown, ...args: unknown[]) =>
+          Math.abs(Number(values.get(Number(left))) - Number(values.get(Number(right)))) > Number(values.get(Number(threshold)))
+            ? (values.get(Number(fn)) as (...args: unknown[]) => unknown)(...args)
+            : null,
+        );
+        values.set(opIfDefined, (source: unknown, fn: unknown, ...args: unknown[]) =>
+          values.get(Number(source)) === undefined
+            ? null
+            : (values.get(Number(fn)) as (...args: unknown[]) => unknown)(...args),
+        );
+        values.set(opBind, (target: unknown, source: unknown, key: unknown) => {
+          const object = values.get(Number(source)) as Record<string, unknown>;
+          const method = object[String(values.get(Number(key)))] as (...args: unknown[]) => unknown;
+          values.set(Number(target), method.bind(object));
+        });
+        values.set(opAwait, (target: unknown, source: unknown) => {
+          try {
+            const promise = values.get(Number(source));
+            return Promise.resolve(promise).then((value) => values.set(Number(target), value));
+          } catch {
+            return undefined;
+          }
+        });
+        values.set(opSubroutine, (target: unknown, queue: unknown[]) => {
+          const previous = [...(values.get(opQueue) as unknown[][])];
+          values.set(opQueue, [...queue]);
+          return runQueue()
+            .catch((error) => values.set(Number(target), String(error)))
+            .finally(() => values.set(opQueue, previous));
+        });
+        values.set(opNoopA, () => undefined);
+        values.set(opNoopB, () => undefined);
+        values.set(opNoopC, () => undefined);
+      }
+
+      return await serialize(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            resetVm();
+            values.set(opSecret, secret);
+            let settled = false;
+            const timer = setTimeout(() => {
+              if (settled) return;
+              settled = true;
+              resolve(String(steps));
+            }, 500);
+            values.set(opResolve, (value: unknown) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve(btoa(String(value)));
+            });
+            values.set(opReject, (value: unknown) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              reject(new Error(btoa(String(value))));
+            });
+            values.set(opDefineFunction, (target: unknown, returnSlot: unknown, argSlotsOrQueue: unknown, queueOrArgs: unknown) => {
+              const hasArgSlots = Array.isArray(queueOrArgs);
+              const argSlots = (hasArgSlots ? argSlotsOrQueue : []) as unknown[];
+              const queue = (hasArgSlots ? queueOrArgs : argSlotsOrQueue) as unknown[];
+              values.set(Number(target), (...args: unknown[]) => {
+                if (settled) return undefined;
+                const previous = [...(values.get(opQueue) as unknown[][])];
+                if (hasArgSlots) {
+                  for (let index = 0; index < argSlots.length; index += 1) {
+                    values.set(Number(argSlots[index]), args[index]);
+                  }
+                }
+                values.set(opQueue, [...queue]);
+                return runQueue()
+                  .then(() => values.get(Number(returnSlot)))
+                  .catch((error) => String(error))
+                  .finally(() => values.set(opQueue, previous));
+              });
+            });
+            try {
+              values.set(opQueue, JSON.parse(xor(atob(dx), secret)) as unknown[][]);
+              runQueue().catch((error) => {
+                if (!settled) {
+                  settled = true;
+                  clearTimeout(timer);
+                  resolve(btoa(`${steps}: ${error}`));
+                }
+              });
+            } catch (error) {
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(btoa(`${steps}: ${error}`));
+              }
+            }
+          }),
+      );
+    }
+
+    function generateRequirementsTokenAnswer(): string {
+      try {
+        const config = proofConfig();
+        config[3] = 1;
+        config[9] = 0;
+        return encodeProofConfig(config);
+      } catch (error) {
+        return `wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D${encodeProofConfig(String(error ?? "e"))}`;
+      }
+    }
+
+    function generateProofAnswer(seed: string, difficulty: string): string {
+      const start = performance.now();
+      const config = proofConfig();
+      for (let attempt = 0; attempt < 500_000; attempt += 1) {
+        config[3] = attempt;
+        config[9] = Math.round(performance.now() - start);
+        const encoded = encodeProofConfig(config);
+        if (fnvHash(`${seed}${encoded}`).substring(0, difficulty.length) <= difficulty) {
+          return `${encoded}~S`;
+        }
+      }
+      return `wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D${encodeProofConfig("e")}`;
+    }
+
+    function proofConfig(): unknown[] {
+      const memory = (performance as Performance & { memory?: { jsHeapSizeLimit?: unknown } }).memory;
+      return [
+        (screen?.width ?? 0) + (screen?.height ?? 0),
+        `${new Date()}`,
+        memory?.jsHeapSizeLimit,
+        Math.random(),
+        navigator.userAgent,
+        randomItem(Array.from(document.scripts).map((script) => script?.src).filter(Boolean)),
+        Array.from(document.scripts || [])
+          .map((script) => script?.src?.match("c/[^/]*/_"))
+          .filter((match) => match?.length)[0]?.[0] ?? document.documentElement.getAttribute("data-build"),
+        navigator.language,
+        navigator.languages?.join(","),
+        Math.random(),
+        randomNavigatorProbe(),
+        randomItem(Object.keys(document)),
+        randomItem(Object.keys(window)),
+        performance.now(),
+        crypto.randomUUID(),
+        [...new URLSearchParams(window.location.search).keys()].join(","),
+        navigator?.hardwareConcurrency,
+        performance.timeOrigin,
+        Number("ai" in window),
+        Number("createPRNG" in window),
+        Number("cache" in window),
+        Number("data" in window),
+        Number("solana" in window),
+        Number("dump" in window),
+        Number("InstallTrigger" in window),
+      ];
+    }
+
+    function randomNavigatorProbe(): string {
+      const key = randomItem(Object.keys(Object.getPrototypeOf(navigator)));
+      try {
+        const value = (navigator as unknown as Record<string, unknown>)[key];
+        return `${key}-${String(value)}`;
+      } catch {
+        return key;
+      }
+    }
+
+    function randomItem(items: string[]): string {
+      if (items.length === 0) return "";
+      return items[Math.floor(Math.random() * items.length)] ?? "";
+    }
+
+    function encodeProofConfig(value: unknown): string {
+      const json = JSON.stringify(value);
+      if (window.TextEncoder) {
+        return btoa(String.fromCharCode(...new TextEncoder().encode(json)));
+      }
+      return btoa(unescape(encodeURIComponent(json)));
+    }
+
+    function fnvHash(value: string): string {
+      let hash = 2166136261;
+      for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619) >>> 0;
+      }
+      hash ^= hash >>> 16;
+      hash = Math.imul(hash, 2246822507) >>> 0;
+      hash ^= hash >>> 13;
+      hash = Math.imul(hash, 3266489909) >>> 0;
+      hash ^= hash >>> 16;
+      return (hash >>> 0).toString(16).padStart(8, "0");
+    }
   }})(${JSON.stringify(CHATGPT_CONVERSATION_ENDPOINT)}, ${JSON.stringify(requestBody)}, ${JSON.stringify(accountId)})`;
 }
 
+interface PreparedChatRequirements {
+  prepare_token?: unknown;
+  proofofwork?: {
+    required?: unknown;
+    seed?: unknown;
+    difficulty?: unknown;
+  };
+  turnstile?: {
+    required?: unknown;
+    dx?: unknown;
+  };
+}
+
 function buildRequestBody(job: JobRecord): Record<string, unknown> {
-  const model = stringOption(job.model) ?? "auto";
   const prompt = buildConversationPrompt(job);
-  const reasoningEffort = normalizeReasoning(job.reasoning);
+  const thinkingEffort = normalizeReasoning(job.reasoning);
+  const model = normalizeModel(job.model, thinkingEffort);
+  const conversationId = stringOption(job.options.conversationId);
+  const parentMessageId = stringOption(job.options.parentMessageId) ?? "client-created-root";
+  const temporary = booleanOption(job.options.temporary, !conversationId);
   const body: Record<string, unknown> = {
     action: "next",
     messages: [
       {
         id: randomUUID(),
         author: { role: "user" },
+        create_time: Math.floor(Date.now() / 1000),
         content: { content_type: "text", parts: [prompt] },
         metadata: {},
       },
     ],
     model,
-    parent_message_id: randomUUID(),
+    parent_message_id: parentMessageId,
+    client_prepare_state: "none",
     timezone_offset_min: new Date().getTimezoneOffset(),
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC",
-    suggestions: [],
-    history_and_training_disabled: !booleanOption(job.options.store, false),
     conversation_mode: { kind: "primary_assistant" },
-    force_paragen: false,
-    force_paragen_model_slug: "",
-    force_rate_limit: false,
-    reset_rate_limits: false,
-    websocket_request_id: randomUUID(),
+    enable_message_followups: true,
+    system_hints: [],
     supports_buffering: true,
     supported_encodings: ["v1"],
+    client_contextual_info: { app_name: "chatgpt" },
+    paragen_cot_summary_display_override: "allow",
+    force_parallel_switch: "auto",
   };
 
-  if (reasoningEffort !== "auto") {
-    body.reasoning_effort = reasoningEffort;
+  if (conversationId) {
+    body.conversation_id = conversationId;
+  }
+  if (temporary) {
+    body.history_and_training_disabled = true;
+    body.client_contextual_info = { app_name: "chatgpt.com" };
+  }
+  if (model !== "auto" && thinkingEffort !== "auto") {
+    body.thinking_effort = thinkingEffort;
   }
 
   return body;
@@ -224,7 +878,9 @@ function readResponseText(raw: string): string {
     buffer = buffer.slice(boundary + 2);
     const event = parseSseFrame(frame);
     const parsed = readConversationEvent(event);
-    completedText = parsed.text ?? completedText;
+    if (parsed.text !== null) {
+      completedText = parsed.append ? `${completedText ?? ""}${parsed.text}` : parsed.text;
+    }
     completed = completed || parsed.completed;
     boundary = buffer.indexOf("\n\n");
   }
@@ -232,7 +888,9 @@ function readResponseText(raw: string): string {
   if (buffer.trim()) {
     const event = parseSseFrame(buffer);
     const parsed = readConversationEvent(event);
-    completedText = parsed.text ?? completedText;
+    if (parsed.text !== null) {
+      completedText = parsed.append ? `${completedText ?? ""}${parsed.text}` : parsed.text;
+    }
     completed = completed || parsed.completed;
   }
 
@@ -257,18 +915,28 @@ function readResponseText(raw: string): string {
 function readConversationEvent(event: Record<string, unknown> | null): {
   text: string | null;
   completed: boolean;
+  append: boolean;
 } {
-  if (!event) return { text: null, completed: false };
+  if (!event) return { text: null, completed: false, append: false };
   if (event.type === "error") {
     throw new ProError("UPSTREAM_ERROR", readErrorMessage(event), {
       exitCode: EXIT.upstream,
       suggestions: ["Retry later or check usage limits."],
     });
   }
+  const patchText = readPatchAppendText(event);
+  if (patchText !== null) {
+    return {
+      text: patchText,
+      append: true,
+      completed: event.type === "done" || event.type === "message_stream_complete",
+    };
+  }
   const messageText = readConversationMessageText(event);
   return {
     text: messageText,
-    completed: event.type === "done" || isConversationMessageDone(event),
+    append: false,
+    completed: event.type === "done" || event.type === "message_stream_complete" || isConversationMessageDone(event),
   };
 }
 
@@ -284,7 +952,8 @@ function parseSseFrame(frame: string): Record<string, unknown> | null {
 }
 
 function readConversationMessageText(event: Record<string, unknown>): string | null {
-  const message = event.message as { author?: unknown; content?: unknown } | undefined;
+  const value = event.v as { message?: unknown } | undefined;
+  const message = (event.message ?? value?.message) as { author?: unknown; content?: unknown } | undefined;
   const author = message?.author as { role?: unknown } | undefined;
   if (author?.role !== "assistant") return null;
 
@@ -296,8 +965,24 @@ function readConversationMessageText(event: Record<string, unknown>): string | n
   return parts.join("");
 }
 
+function readPatchAppendText(event: Record<string, unknown>): string | null {
+  if (event.o !== "patch" || !Array.isArray(event.v)) return null;
+  const chunks = event.v
+    .filter((patch): patch is { o: unknown; p: unknown; v: unknown } => Boolean(patch) && typeof patch === "object")
+    .filter(
+      (patch) =>
+        patch.o === "append" &&
+        typeof patch.p === "string" &&
+        /^\/message\/content\/parts\/\d+$/.test(patch.p) &&
+        typeof patch.v === "string",
+    )
+    .map((patch) => patch.v);
+  return chunks.length > 0 ? chunks.join("") : null;
+}
+
 function isConversationMessageDone(event: Record<string, unknown>): boolean {
-  const message = event.message as { status?: unknown; end_turn?: unknown } | undefined;
+  const value = event.v as { message?: unknown } | undefined;
+  const message = (event.message ?? value?.message) as { status?: unknown; end_turn?: unknown } | undefined;
   return message?.status === "finished_successfully" || message?.end_turn === true;
 }
 
@@ -308,8 +993,19 @@ function readErrorMessage(event: Record<string, unknown>): string {
 }
 
 function normalizeReasoning(reasoning: string): string {
-  if (["auto", "low", "medium", "high"].includes(reasoning)) return reasoning;
+  if (reasoning === "low") return "min";
+  if (reasoning === "medium") return "standard";
+  if (reasoning === "high") return "max";
+  if (["auto", "min", "standard", "extended", "max"].includes(reasoning)) return reasoning;
   return "auto";
+}
+
+function normalizeModel(model: string, thinkingEffort: string): string {
+  if (!model || model === "auto") {
+    if (thinkingEffort === "auto") return "auto";
+    return "gpt-5-5-thinking";
+  }
+  return model;
 }
 
 function stringOption(value: unknown): string | undefined {

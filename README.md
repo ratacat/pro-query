@@ -57,6 +57,8 @@ pro doctor --json
 
 Keep the dedicated Chrome window open while using `pro run`, `pro submit`, or `pro wait`. The normal ChatGPT frontend request is executed inside that logged-in browser context.
 
+Port `9222` is the default. If that port is already in use, run `pro auth command --port 9223 --json`, keep using the returned `--cdp http://127.0.0.1:9223` value, and pass the same `--cdp` or `--port` to `pro doctor`, `pro run`, and `pro submit`. `pro wait` uses the CDP value stored on the submitted job.
+
 ## Agents File
 
 Put this in the highest shared agent instructions file you control, such as a user-level `AGENTS.md` or `CLAUDE.md`, so agents in any project can use it:
@@ -69,7 +71,7 @@ Use `pro` to ask my ChatGPT Pro web account for hard questions, extended thinkin
 
 `pro` is designed for your agent to operate. These are the commands an agent should run while working inside any repo. Agents should use `--json`; non-TTY stdout switches to JSON automatically.
 
-`run`, `submit`, and `wait` default to `http://127.0.0.1:9222` for the active ChatGPT browser context. Pass `--cdp` or `--port` if the Chrome command used a different port.
+`run` and `submit` default to `http://127.0.0.1:9222` for the active ChatGPT browser context. Pass `--cdp` or `--port` if the Chrome command used a different port. `wait` uses the CDP value stored on the submitted job.
 
 Setup and auth:
 
@@ -105,13 +107,25 @@ Direct work, when the caller wants to block:
 pro run @prompt.md --model auto --reasoning high --json
 ```
 
+New `run` and `submit` requests default to temporary ChatGPT conversations. Use `--save` when the turn should be written to ChatGPT history. Continuing with `--conversation` defaults to saved mode; pass both ids from the ChatGPT conversation:
+
+```sh
+pro run "follow up" --save --conversation <conversation-id> --parent <message-id> --json
+```
+
+When `--model auto` is paired with a thinking mode, `pro` selects the current Thinking model and maps aliases onto the web app's effort values: `low=min`, `medium=standard`, `high=max`, and `extended=extended`. For an explicit model id, use an effort shown by `pro models --json` for that model.
+
 Request controls:
 
 ```sh
 --model auto|<id from pro models>
---reasoning auto|low|medium|high
+--reasoning auto|low|medium|high|extended|min|standard|max
 --cdp http://127.0.0.1:9222
 --port 9222
+--temporary
+--save
+--conversation <conversation-id>
+--parent <message-id>
 --verbosity low|medium|high
 --instructions "system text"
 --instructions-file prompt-system.txt

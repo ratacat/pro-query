@@ -27,8 +27,14 @@ export async function getCookiesFromCdp(
   const wsUrl = await resolveCdpWebSocketUrl(cdpBase);
   const client = await CdpClient.connect(wsUrl, timeoutMs);
   try {
-    const response = await client.send<{ cookies: CdpCookie[] }>("Network.getCookies", { urls });
-    return response.cookies ?? [];
+    try {
+      const response = await client.send<{ cookies: CdpCookie[] }>("Network.getCookies", { urls });
+      return filterCookiesForUrls(response.cookies ?? [], urls);
+    } catch (error) {
+      if (!isMissingCdpMethod(error)) throw error;
+      const response = await client.send<{ cookies: CdpCookie[] }>("Storage.getCookies");
+      return filterCookiesForUrls(response.cookies ?? [], urls);
+    }
   } finally {
     client.close();
   }
@@ -39,7 +45,7 @@ export async function evaluateInCdpPage<T>(
   expression: string,
   timeoutMs = 10_000,
 ): Promise<T> {
-  const wsUrl = await resolveCdpWebSocketUrl(cdpBase);
+  const wsUrl = await resolveRequiredPageWebSocketUrl(cdpBase);
   const client = await CdpClient.connect(wsUrl, timeoutMs);
   try {
     const response = await client.send<{
@@ -66,11 +72,31 @@ export async function evaluateInCdpPage<T>(
   }
 }
 
+async function resolveRequiredPageWebSocketUrl(cdpBase: string): Promise<string> {
+  const base = cdpBase.replace(/\/$/, "");
+  const pageWsUrl = await resolvePageWebSocketUrl(base);
+  if (pageWsUrl) return pageWsUrl;
+
+  await resolveBrowserWebSocketUrl(base);
+  throw new ProError("CHATGPT_PAGE_MISSING", `No inspectable page is available over CDP at ${base}.`, {
+    exitCode: EXIT.auth,
+    suggestions: [
+      "Open the Chrome command from pro auth command.",
+      "Confirm the CDP Chrome window has a https://chatgpt.com/ tab.",
+    ],
+    details: { cdpBase: base },
+  });
+}
+
 async function resolveCdpWebSocketUrl(cdpBase: string): Promise<string> {
   const base = cdpBase.replace(/\/$/, "");
   const pageWsUrl = await resolvePageWebSocketUrl(base);
   if (pageWsUrl) return pageWsUrl;
 
+  return resolveBrowserWebSocketUrl(base);
+}
+
+async function resolveBrowserWebSocketUrl(base: string): Promise<string> {
   let response: Response;
   try {
     response = await fetch(`${base}/json/version`);
@@ -98,6 +124,34 @@ async function resolveCdpWebSocketUrl(cdpBase: string): Promise<string> {
     });
   }
   return payload.webSocketDebuggerUrl;
+}
+
+function filterCookiesForUrls(cookies: CdpCookie[], urls: string[]): CdpCookie[] {
+  return cookies.filter((cookie) => urls.some((url) => cookieAppliesToUrl(cookie, url)));
+}
+
+function cookieAppliesToUrl(cookie: CdpCookie, url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const domain = (cookie.domain || "").replace(/^\./, "").toLowerCase();
+  if (!domain) return false;
+  if (host !== domain && !host.endsWith(`.${domain}`)) return false;
+
+  const cookiePath = cookie.path || "/";
+  return parsed.pathname.startsWith(cookiePath) || cookiePath === "/";
+}
+
+function isMissingCdpMethod(error: unknown): boolean {
+  return (
+    error instanceof ProError &&
+    error.code === "CDP_COMMAND_FAILED" &&
+    error.details?.cdpCode === -32601
+  );
 }
 
 async function resolvePageWebSocketUrl(base: string): Promise<string | null> {

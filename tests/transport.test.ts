@@ -46,12 +46,16 @@ describe("ChatGPT transport", () => {
 
       expect(result).toBe("OK");
       expect(cdpBase).toBe("http://127.0.0.1:9225");
-      expect(expression).toContain("https://chatgpt.com/backend-api/conversation");
+      expect(expression).toContain("https://chatgpt.com/backend-api/f/conversation");
+      expect(expression).toContain("https://chatgpt.com/backend-api/f/conversation/prepare");
+      expect(expression).toContain("https://chatgpt.com/backend-api/f/conversation/resume");
+      expect(expression).toContain("https://chatgpt.com/backend-api/sentinel/chat-requirements/prepare");
+      expect(expression).toContain("OpenAI-Sentinel-Chat-Requirements-Token");
       expect(expression).not.toContain("codex/responses");
       expect(expression).toContain('"action":"next"');
-      expect(expression).toContain('"model":"auto"');
+      expect(expression).toContain('"model":"gpt-5-5-thinking"');
+      expect(expression).toContain('"thinking_effort":"min"');
       expect(expression).toContain('"history_and_training_disabled":true');
-      expect(expression).toContain('"reasoning_effort":"low"');
       expect(expression).toContain("Use terse answers.\\n\\nReply with OK only.");
       expect(expression).not.toContain("header.");
     });
@@ -114,6 +118,49 @@ describe("ChatGPT transport", () => {
           body: [
             'data: {"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":["OK"]},"status":"in_progress"}}',
             "data: [DONE]",
+            "",
+          ].join("\n\n"),
+        }) as T);
+
+      const result = await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+
+      expect(result).toBe("OK");
+    });
+  });
+
+  test("reads patch-style /f/conversation streams", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: [
+            'data: {"v":{"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":[""]},"status":"in_progress"}}}',
+            'data: {"o":"patch","v":[{"p":"/message/content/parts/0","o":"append","v":"O"},{"p":"/message/content/parts/0","o":"append","v":"K"}]}',
+            'data: {"type":"message_stream_complete"}',
+            "",
+          ].join("\n\n"),
+        }) as T);
+
+      const result = await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+
+      expect(result).toBe("OK");
+    });
+  });
+
+  test("reads resumed handoff streams appended after the initial response", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: [
+            'data: {"type":"resume_conversation_token","token":"resume_token","conversation_id":"conv_test"}',
+            'data: {"type":"stream_handoff","conversation_id":"conv_test"}',
+            "data: [DONE]",
+            "",
+            'data: {"o":"patch","v":[{"p":"/message/content/parts/0","o":"append","v":"O"},{"p":"/message/content/parts/0","o":"append","v":"K"}]}',
+            'data: {"type":"message_stream_complete"}',
             "",
           ].join("\n\n"),
         }) as T);

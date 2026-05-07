@@ -84,7 +84,7 @@ export async function listModels(options: { sessionTokenPath: string }): Promise
           id: "auto",
           label: "ChatGPT default",
           source: "live",
-          reasoningLevels: ["auto", "low", "medium", "high"],
+          reasoningLevels: ["auto", "low", "medium", "high", "extended", "min", "standard", "max"],
           default: false,
           ...(defaultModel ? { aliasFor: defaultModel } : {}),
         },
@@ -107,7 +107,7 @@ export function listStaticModels(warning?: string): ModelList {
         id: "auto",
         label: "ChatGPT default",
         source: "static-unverified",
-        reasoningLevels: ["auto", "low", "medium", "high"],
+        reasoningLevels: ["auto", "low", "medium", "high", "extended", "min", "standard", "max"],
       },
     ],
     warning: warning ?? "Live model discovery requires a captured ChatGPT session token.",
@@ -139,9 +139,14 @@ function parseLiveModels(payload: LiveModelPayload): ModelCapability[] {
 }
 
 function parseReasoningLevels(value: unknown): string[] {
-  if (!Array.isArray(value)) return ["auto", "low", "medium", "high"];
-  const levels = value.filter((item): item is string => typeof item === "string");
-  return levels.length > 0 ? levels : ["auto", "low", "medium", "high"];
+  if (!Array.isArray(value)) return ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
+  const levels = value.flatMap((item) => {
+    if (typeof item === "string") return [item];
+    if (!item || typeof item !== "object") return [];
+    const effort = (item as { thinking_effort?: unknown }).thinking_effort;
+    return typeof effort === "string" ? [effort] : [];
+  });
+  return levels.length > 0 ? levels : ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
 }
 
 function parseEnabledTools(value: unknown): string[] {

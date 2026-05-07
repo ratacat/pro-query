@@ -265,10 +265,61 @@ describe("robot-mode CLI", () => {
       const payload = JSON.parse(result.stdout);
       expect(payload.data.job.status).toBe("succeeded");
       expect(payload.data.job.prompt).toBe("");
+      expect(payload.data.job.options.temporary).toBe(true);
       expect(payload.data.result).toBe("OK");
       const requestBody = requestBodyFromExpression(expression);
-      expect(requestBody.reasoning_effort).toBe("high");
+      expect(requestBody.model).toBe("gpt-5-5-thinking");
+      expect(requestBody.thinking_effort).toBe("max");
+      expect(requestBody.history_and_training_disabled).toBe(true);
       expect(requestBody).not.toHaveProperty("text");
+    });
+  });
+
+  test("run can opt into saved and continued conversations", async () => {
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      let expression = "";
+      installFakeCdp(conversationStream("OK"), (script) => {
+        expression = script;
+      });
+
+      const result = await run(
+        [
+          "run",
+          "continue this",
+          "--json",
+          "--save",
+          "--conversation",
+          "conv_123",
+          "--parent",
+          "msg_456",
+          "--reasoning",
+          "extended",
+        ],
+        { tty: true, home },
+      );
+
+      expect(result.code).toBe(0);
+      const requestBody = requestBodyFromExpression(expression);
+      expect(requestBody.conversation_id).toBe("conv_123");
+      expect(requestBody.parent_message_id).toBe("msg_456");
+      expect(requestBody.model).toBe("gpt-5-5-thinking");
+      expect(requestBody).not.toHaveProperty("history_and_training_disabled");
+      expect(requestBody.thinking_effort).toBe("extended");
+    });
+  });
+
+  test("continuing a conversation requires conversation and parent ids together", async () => {
+    await withHome(async (home) => {
+      const result = await run(["submit", "hello", "--conversation", "conv_123", "--json"], {
+        tty: true,
+        home,
+      });
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("both ids");
     });
   });
 
@@ -308,7 +359,68 @@ describe("robot-mode CLI", () => {
       expect(payload.error.message).toContain("Unsupported --temperature");
     });
   });
+
+  test("doctor refuses ready when the CDP ChatGPT page is logged out", async () => {
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      installFakeCdpValue({
+        status: 200,
+        hasAccessToken: false,
+        origin: "https://chatgpt.com",
+      });
+
+      const result = await run(["doctor", "--json", "--timeout", "1000"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.auth.tokenStatus).toBe("present");
+      expect(payload.data.browserSession.status).toBe("logged_out");
+      expect(payload.data.ready).toBe(false);
+      expect(payload.data.transport.status).toBe("auth_required");
+      expect(payload.data.next.command).toContain("pro auth capture");
+    });
+  });
+
+  test("doctor reports ready only when stored auth and live browser session are both present", async () => {
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      installFakeCdpValue({
+        status: 200,
+        hasAccessToken: true,
+        origin: "https://chatgpt.com",
+      });
+
+      const result = await run(["doctor", "--json", "--cdp", "http://127.0.0.1:9555"], {
+        tty: true,
+        home,
+      });
+
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.browserSession.status).toBe("present");
+      expect(payload.data.browserSession.cdpBase).toBe("http://127.0.0.1:9555");
+      expect(payload.data.ready).toBe(true);
+      expect(payload.data.transport.status).toBe("configured");
+      expect(payload.data.next.command).toContain("--cdp http://127.0.0.1:9555");
+      expect(result.stdout).not.toContain("header.");
+    });
+  });
 });
+
+async function writeSessionToken(home: string): Promise<void> {
+  await mkdir(join(home, "tokens"), { recursive: true });
+  await writeFile(
+    join(home, "tokens", "chatgpt-session.json"),
+    JSON.stringify({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      source: "pro-cdp-page",
+      accessToken: fakeJwt(),
+      accountId: "acct_test",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    }),
+  );
+}
 
 function fakeJwt(): string {
   const payload = {
@@ -319,6 +431,10 @@ function fakeJwt(): string {
 }
 
 function installFakeCdp(body: string, onExpression?: (expression: string) => void): void {
+  installFakeCdpValue({ ok: true, status: 200, body }, onExpression);
+}
+
+function installFakeCdpValue(value: unknown, onExpression?: (expression: string) => void): void {
   globalThis.fetch = (async (url: string | URL | Request) => {
     const target = String(url);
     if (target.endsWith("/json")) {
@@ -348,9 +464,7 @@ function installFakeCdp(body: string, onExpression?: (expression: string) => voi
       const response = {
         id: message.id,
         result: {
-          result: {
-            value: { ok: true, status: 200, body },
-          },
+          result: { value },
         },
       };
       queueMicrotask(() =>
@@ -367,7 +481,7 @@ function installFakeCdp(body: string, onExpression?: (expression: string) => voi
 }
 
 function requestBodyFromExpression(expression: string): Record<string, unknown> {
-  const marker = '})("https://chatgpt.com/backend-api/conversation", ';
+  const marker = '})("https://chatgpt.com/backend-api/f/conversation", ';
   const start = expression.lastIndexOf(marker);
   expect(start).toBeGreaterThanOrEqual(0);
   const bodyStart = start + marker.length;
