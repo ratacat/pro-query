@@ -60,7 +60,7 @@ describe("ChatGPT transport", () => {
       expect(result).toBe("OK");
       expect(authHeader).toStartWith("Bearer ");
       expect(accountHeader).toBe("acct_test");
-      expect(requestBody?.model).toBe("gpt-5.4");
+      expect(requestBody?.model).toBe("gpt-5.5");
       expect(requestBody?.stream).toBe(true);
     });
   });
@@ -84,7 +84,7 @@ function job(): JobRecord {
     id: "job_test",
     status: "running",
     prompt: "Reply with OK only.",
-    model: "gpt-5.4",
+    model: "auto",
     reasoning: "low",
     options: {},
     result: null,

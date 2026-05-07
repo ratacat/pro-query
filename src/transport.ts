@@ -56,7 +56,7 @@ export async function runChatGptJob(job: JobRecord, options: TransportOptions): 
 }
 
 function buildRequestBody(job: JobRecord): Record<string, unknown> {
-  const model = job.model === "auto" ? "gpt-5.4" : job.model;
+  const model = job.model === "auto" ? "gpt-5.5" : job.model;
   return {
     model,
     store: false,

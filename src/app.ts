@@ -4,7 +4,7 @@ import { captureAuth, defaultCdpBase, getAuthStatus } from "./auth";
 import { loadConfig, resolvePaths, saveConfig } from "./config";
 import { EXIT, ProError, toProError } from "./errors";
 import { JobStore, redactJob } from "./jobs";
-import { listStaticModels } from "./models";
+import { listModels } from "./models";
 import type { CliIO } from "./output";
 import { writeError, writeSuccess } from "./output";
 import { runChatGptJob } from "./transport";
@@ -58,7 +58,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         throw invalidArgs("Unknown auth command.", ["Use pro auth status or pro auth capture."]);
       }
       case "models": {
-        writeSuccess(io, mode, listStaticModels());
+        writeSuccess(io, mode, await listModels({ sessionTokenPath: paths.sessionTokenPath }));
         return EXIT.success;
       }
       case "submit": {
