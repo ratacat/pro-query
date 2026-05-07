@@ -146,12 +146,12 @@ export class JobStore {
   }
 
   markSucceeded(id: string, result: string): JobRecord {
-    this.update(id, { status: "succeeded", result, error: null });
+    this.finishRunning(id, { status: "succeeded", result, error: null });
     return this.get(id);
   }
 
   markFailed(id: string, error: ProError): JobRecord {
-    this.update(id, {
+    this.finishRunning(id, {
       status: "failed",
       error: JSON.stringify(error.toPayload()),
     });
@@ -176,6 +176,24 @@ export class JobStore {
     this.db
       .query("UPDATE jobs SET status = ?, result = ?, error_json = ?, updated_at = ? WHERE id = ?")
       .run(next.status, next.result, next.error, next.updatedAt, id);
+  }
+
+  private finishRunning(
+    id: string,
+    patch: { status: "succeeded" | "failed"; result?: string | null; error?: string | null },
+  ): void {
+    const job = this.get(id);
+    const next = {
+      status: patch.status,
+      result: patch.result === undefined ? job.result : patch.result,
+      error: patch.error === undefined ? job.error : patch.error,
+      updatedAt: new Date().toISOString(),
+    };
+    this.db
+      .query(
+        "UPDATE jobs SET status = ?, result = ?, error_json = ?, updated_at = ? WHERE id = ? AND status = ?",
+      )
+      .run(next.status, next.result, next.error, next.updatedAt, id, "running");
   }
 }
 
