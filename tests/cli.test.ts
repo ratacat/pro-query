@@ -72,6 +72,54 @@ describe("robot-mode CLI", () => {
     expect(payload.error.suggestions).toContain("Run pro help.");
   });
 
+  test("setup gives a safe first-run path without secrets", async () => {
+    await withHome(async (home) => {
+      const result = await run(["setup", "--json"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).not.toContain("secret");
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.ready).toBe(false);
+      expect(payload.data.steps.map((step: { id: string }) => step.id)).toEqual([
+        "install",
+        "open-chatgpt",
+        "capture-auth",
+        "smoke-test",
+      ]);
+      expect(payload.data.steps[1].command).toContain("chrome-profile");
+      expect(payload.data.steps[2].command).toContain("pro auth capture");
+      expect(payload.data.safety.rawValuesPrinted).toBe(false);
+    });
+  });
+
+  test("setup is readable for TTY users", async () => {
+    await withHome(async (home) => {
+      const result = await run(["setup"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("pro needs a logged-in ChatGPT browser session");
+      expect(result.stdout).toContain("[todo] open-chatgpt");
+      expect(result.stdout).toContain("pro auth capture");
+      expect(result.stdout).not.toContain("{\"ready\"");
+    });
+  });
+
+  test("auth command prints dedicated profile launch and capture commands", async () => {
+    await withHome(async (home) => {
+      const result = await run(["auth", "command", "--port", "9333", "--json"], {
+        tty: true,
+        home,
+      });
+
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.command).toContain("chrome-profile");
+      expect(payload.data.command).toContain("9333");
+      expect(payload.data.captureCommand).toBe("pro auth capture --cdp http://127.0.0.1:9333 --json");
+      expect(payload.data.safety).toContain("dedicated");
+    });
+  });
+
   test("reports missing auth without raw cookie values", async () => {
     await withHome(async (home) => {
       const result = await run(["auth", "status", "--json"], { tty: true, home });
@@ -205,6 +253,33 @@ describe("robot-mode CLI", () => {
       expect(payload.data.result).toBe("OK");
       expect(requestBody.reasoning).toEqual({ effort: "high", summary: "auto" });
       expect(requestBody.text).toEqual({ verbosity: "low" });
+    });
+  });
+
+  test("run prints plain text result for TTY users", async () => {
+    await withHome(async (home) => {
+      await mkdir(join(home, "tokens"), { recursive: true });
+      await writeFile(
+        join(home, "tokens", "chatgpt-session.json"),
+        JSON.stringify({
+          version: 1,
+          generatedAt: new Date().toISOString(),
+          source: "pro-cdp-page",
+          accessToken: fakeJwt(),
+          accountId: "acct_test",
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+      );
+      globalThis.fetch = (async () =>
+        new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )) as unknown as typeof fetch;
+
+      const result = await run(["run", "hello"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe("OK\n");
     });
   });
 

@@ -14,7 +14,7 @@ import { writeError, writeSuccess } from "./output";
 import { runChatGptJob } from "./transport";
 
 const HELP_TEXT =
-  "pro: ChatGPT Pro CLI\nauth capture|status, models, submit, run, status, wait, result, cancel, jobs, doctor\nUse --json for agents.";
+  "pro: ChatGPT Pro CLI\nsetup, auth command, auth capture, auth status, models, run, submit, wait, result, jobs, doctor\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -33,9 +33,19 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
     const paths = resolvePaths(io.env, config);
 
     switch (command) {
+      case "setup": {
+        const auth = await getAuthStatus(paths);
+        const port = flagString(parsed.flags, "port") ?? "9222";
+        writeSuccess(io, mode, buildSetupGuide(auth, paths.home, port));
+        return EXIT.success;
+      }
       case "auth": {
         if (subcommand === "status") {
           writeSuccess(io, mode, await getAuthStatus(paths));
+          return EXIT.success;
+        }
+        if (subcommand === "command") {
+          writeSuccess(io, mode, buildAuthCommand(paths.home, flagString(parsed.flags, "port") ?? "9222"));
           return EXIT.success;
         }
         if (subcommand === "capture") {
@@ -206,13 +216,25 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "doctor": {
         const auth = await getAuthStatus(paths);
+        const ready = auth.tokenStatus === "present" && auth.accountIdPresent;
         writeSuccess(io, mode, {
           auth,
+          ready,
+          next: ready
+            ? {
+                command: 'pro run "Reply with OK only." --json',
+                reason: "Auth is present; run a smoke query.",
+              }
+            : {
+                command: "pro setup --json",
+                reason: "Auth is missing or expired; follow the setup steps.",
+              },
           storage: { home: paths.home, dbPath: paths.dbPath },
           transport: {
-            status: auth.tokenStatus === "present" ? "configured" : "auth_required",
+            status: ready ? "configured" : "auth_required",
             endpoint: "https://chatgpt.com/backend-api/codex/responses",
           },
+          safety: safetySummary(),
         });
         return EXIT.success;
       }
@@ -232,6 +254,8 @@ function invalidArgs(message: string, suggestions: string[]): ProError {
 
 function commandList(): string[] {
   return [
+    "setup",
+    "auth command",
     "auth status",
     "auth capture",
     "models",
@@ -245,6 +269,78 @@ function commandList(): string[] {
     "config get",
     "doctor",
   ];
+}
+
+function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: string, port: string): Record<string, unknown> {
+  const ready = auth.tokenStatus === "present" && auth.accountIdPresent;
+  const authCommand = buildAuthCommand(home, port);
+  return {
+    ready,
+    summary: ready ? "pro is ready to query ChatGPT." : "pro needs a logged-in ChatGPT browser session.",
+    steps: [
+      {
+        id: "install",
+        status: "done",
+        command: "bun install && bun link",
+        note: "Run from the cloned repo until a package name is finalized.",
+      },
+      {
+        id: "open-chatgpt",
+        status: ready ? "done" : "todo",
+        command: authCommand.command,
+        note: "Uses a dedicated Chrome profile under ~/.pro so CDP is not attached to your main browser.",
+      },
+      {
+        id: "capture-auth",
+        status: ready ? "done" : "todo",
+        command: authCommand.captureCommand,
+        note: "Captures scoped cookies plus the page session token into private local files.",
+      },
+      {
+        id: "smoke-test",
+        status: ready ? "todo" : "blocked",
+        command: 'pro run "Reply with OK only." --reasoning low --json',
+        note: "Verifies the live ChatGPT backend request path.",
+      },
+    ],
+    auth,
+    storage: {
+      home,
+      cookieJsonPath: auth.cookieJsonPath,
+      sessionTokenPath: auth.sessionTokenPath,
+    },
+    safety: safetySummary(),
+  };
+}
+
+function buildAuthCommand(home: string, port: string): Record<string, unknown> {
+  const profileDir = join(home, "chrome-profile");
+  const url = "https://chatgpt.com/";
+  const cdp = `http://127.0.0.1:${port}`;
+  const command =
+    process.platform === "darwin"
+      ? `open -na "Google Chrome" --args --user-data-dir=${shellQuote(profileDir)} --remote-debugging-port=${port} ${url}`
+      : process.platform === "win32"
+        ? `start "" chrome.exe --user-data-dir=${windowsQuote(profileDir)} --remote-debugging-port=${port} ${url}`
+        : `google-chrome --user-data-dir=${shellQuote(profileDir)} --remote-debugging-port=${port} ${url}`;
+  return {
+    command,
+    captureCommand: `pro auth capture --cdp ${cdp} --json`,
+    cdp,
+    profileDir,
+    port,
+    safety: "Recommended profile is dedicated to pro; do not expose a normal browser profile over CDP.",
+  };
+}
+
+function safetySummary(): Record<string, unknown> {
+  return {
+    rawValuesPrinted: false,
+    storedLocally: true,
+    fileModes: "0600 files, 0700 directories where supported",
+    sentTo: ["https://chatgpt.com"],
+    reminder: "Cookie and token files are sensitive; do not commit, paste, or share ~/.pro.",
+  };
 }
 
 async function promptFromArgs(args: string[], cwd: string): Promise<string> {
@@ -478,4 +574,12 @@ function redactPaths(paths: { home: string; configPath: string; dbPath: string }
     configPath: paths.configPath,
     dbPath: paths.dbPath,
   };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function windowsQuote(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
 }

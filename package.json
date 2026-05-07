@@ -1,8 +1,19 @@
 {
   "name": "pro-query",
   "version": "0.1.0",
-  "description": "Robot-friendly Bun CLI for using a consented local ChatGPT Pro browser session.",
+  "description": "Local robot-friendly CLI for querying ChatGPT from a consented logged-in browser session.",
   "type": "module",
+  "homepage": "https://github.com/ratacat/pro-query#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ratacat/pro-query.git"
+  },
+  "keywords": [
+    "chatgpt",
+    "cli",
+    "bun",
+    "agents"
+  ],
   "bin": {
     "pro": "./src/cli.ts"
   },
