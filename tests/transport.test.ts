@@ -171,6 +171,29 @@ describe("ChatGPT transport", () => {
     });
   });
 
+  test("keeps accumulated patch text when final snapshots contain only a suffix", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: [
+            'data: {"v":{"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":[""]},"status":"in_progress"}}}',
+            'data: {"p":"/message/content/parts/0","o":"append","v":"Open Chrome. "}',
+            'data: {"v":"Run jobs. "}',
+            'data: {"v":"Close it when done."}',
+            'data: {"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":["Close it when done."]},"status":"finished_successfully"}}',
+            'data: {"type":"message_stream_complete"}',
+            "",
+          ].join("\n\n"),
+        }) as T);
+
+      const result = await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+
+      expect(result).toBe("Open Chrome. Run jobs. Close it when done.");
+    });
+  });
+
   test("maps non-OK upstream responses to structured errors", async () => {
     await withTokenFile(async (sessionTokenPath) => {
       const pageEvaluator = (async <T>(): Promise<T> =>

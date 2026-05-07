@@ -871,15 +871,16 @@ function readResponseText(raw: string): string {
   let buffer = raw;
   let completedText: string | null = null;
   let completed = false;
+  const state: ResponseParseState = { acceptsTextContinuation: false };
 
   let boundary = buffer.indexOf("\n\n");
   while (boundary !== -1) {
     const frame = buffer.slice(0, boundary);
     buffer = buffer.slice(boundary + 2);
     const event = parseSseFrame(frame);
-    const parsed = readConversationEvent(event);
+    const parsed = readConversationEvent(event, state);
     if (parsed.text !== null) {
-      completedText = parsed.append ? `${completedText ?? ""}${parsed.text}` : parsed.text;
+      completedText = mergeStreamText(completedText, parsed.text, parsed.append);
     }
     completed = completed || parsed.completed;
     boundary = buffer.indexOf("\n\n");
@@ -887,9 +888,9 @@ function readResponseText(raw: string): string {
 
   if (buffer.trim()) {
     const event = parseSseFrame(buffer);
-    const parsed = readConversationEvent(event);
+    const parsed = readConversationEvent(event, state);
     if (parsed.text !== null) {
-      completedText = parsed.append ? `${completedText ?? ""}${parsed.text}` : parsed.text;
+      completedText = mergeStreamText(completedText, parsed.text, parsed.append);
     }
     completed = completed || parsed.completed;
   }
@@ -912,19 +913,29 @@ function readResponseText(raw: string): string {
   return completedText;
 }
 
-function readConversationEvent(event: Record<string, unknown> | null): {
+interface ResponseParseState {
+  acceptsTextContinuation: boolean;
+}
+
+function mergeStreamText(current: string | null, next: string, append: boolean): string {
+  if (append) return `${current ?? ""}${next}`;
+  if (current && current.length > next.length && current.endsWith(next)) return current;
+  return next;
+}
+
+function readConversationEvent(event: unknown, state: ResponseParseState): {
   text: string | null;
   completed: boolean;
   append: boolean;
 } {
-  if (!event) return { text: null, completed: false, append: false };
+  if (!isRecord(event)) return { text: null, completed: false, append: false };
   if (event.type === "error") {
     throw new ProError("UPSTREAM_ERROR", readErrorMessage(event), {
       exitCode: EXIT.upstream,
       suggestions: ["Retry later or check usage limits."],
     });
   }
-  const patchText = readPatchAppendText(event);
+  const patchText = readPatchAppendText(event, state);
   if (patchText !== null) {
     return {
       text: patchText,
@@ -940,7 +951,7 @@ function readConversationEvent(event: Record<string, unknown> | null): {
   };
 }
 
-function parseSseFrame(frame: string): Record<string, unknown> | null {
+function parseSseFrame(frame: string): unknown {
   const data = frame
     .split("\n")
     .filter((line) => line.startsWith("data:"))
@@ -948,7 +959,7 @@ function parseSseFrame(frame: string): Record<string, unknown> | null {
     .join("\n");
   if (!data) return null;
   if (data === "[DONE]") return { type: "done" };
-  return JSON.parse(data) as Record<string, unknown>;
+  return JSON.parse(data) as unknown;
 }
 
 function readConversationMessageText(event: Record<string, unknown>): string | null {
@@ -965,19 +976,34 @@ function readConversationMessageText(event: Record<string, unknown>): string | n
   return parts.join("");
 }
 
-function readPatchAppendText(event: Record<string, unknown>): string | null {
+function readPatchAppendText(event: Record<string, unknown>, state: ResponseParseState): string | null {
+  if (event.o === "append" && isMessageContentPartPath(event.p) && typeof event.v === "string") {
+    state.acceptsTextContinuation = true;
+    return event.v;
+  }
+  if (typeof event.v === "string" && state.acceptsTextContinuation) return event.v;
+  state.acceptsTextContinuation = false;
   if (event.o !== "patch" || !Array.isArray(event.v)) return null;
   const chunks = event.v
     .filter((patch): patch is { o: unknown; p: unknown; v: unknown } => Boolean(patch) && typeof patch === "object")
     .filter(
       (patch) =>
         patch.o === "append" &&
-        typeof patch.p === "string" &&
-        /^\/message\/content\/parts\/\d+$/.test(patch.p) &&
+        isMessageContentPartPath(patch.p) &&
         typeof patch.v === "string",
     )
     .map((patch) => patch.v);
-  return chunks.length > 0 ? chunks.join("") : null;
+  if (chunks.length === 0) return null;
+  state.acceptsTextContinuation = true;
+  return chunks.join("");
+}
+
+function isMessageContentPartPath(path: unknown): boolean {
+  return typeof path === "string" && /^\/message\/content\/parts\/\d+$/.test(path);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
 }
 
 function isConversationMessageDone(event: Record<string, unknown>): boolean {
