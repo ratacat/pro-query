@@ -30,7 +30,12 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       return EXIT.success;
     }
 
-    if (!command || command === "help" || command === "--help") {
+    if (
+      !command ||
+      flagBoolean(parsed.flags, "help") ||
+      command === "help" ||
+      command === "--help"
+    ) {
       writeSuccess(io, mode, { text: HELP_TEXT, commands: commandList() });
       return EXIT.success;
     }

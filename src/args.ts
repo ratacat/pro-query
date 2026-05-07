@@ -11,6 +11,7 @@ const BOOLEAN_FLAGS = new Set([
   "dry-run",
   "include-expired",
   "no-start",
+  "help",
   "version",
 ]);
 

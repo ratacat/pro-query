@@ -52,6 +52,15 @@ describe("robot-mode CLI", () => {
     expect(result.stderr).toBe("");
   });
 
+  test("prints compact help with --help for TTY users", async () => {
+    const result = await run(["--help"], { tty: true });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("pro: ChatGPT Pro CLI");
+    expect(result.stdout.length).toBeLessThan(160);
+    expect(result.stderr).toBe("");
+  });
+
   test("auto-switches to JSON when stdout is not a TTY", async () => {
     const result = await run([], { tty: false });
 
