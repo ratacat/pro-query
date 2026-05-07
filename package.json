@@ -1,0 +1,18 @@
+{
+  "name": "pro-query",
+  "version": "0.1.0",
+  "description": "Robot-friendly Bun CLI for using a consented local ChatGPT Pro browser session.",
+  "type": "module",
+  "bin": {
+    "pro": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun test && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.5",
+    "typescript": "^5.9.3"
+  }
+}

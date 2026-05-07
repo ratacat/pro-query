@@ -1,0 +1,13 @@
+.env.local
+.env.*.local
+.secrets/
+*cookies*.txt
+*cookies*.json
+*token*.json
+node_modules/
+dist/
+coverage/
+.pro/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

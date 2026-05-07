@@ -1,0 +1,214 @@
+import { EXIT, ProError } from "./errors";
+
+interface JsonRpcResponse<T> {
+  id?: number;
+  result?: T;
+  error?: { code: number; message: string };
+}
+
+export interface CdpCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: number;
+  size?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  session?: boolean;
+  sameSite?: string;
+}
+
+export async function getCookiesFromCdp(
+  cdpBase: string,
+  urls: string[],
+  timeoutMs = 10_000,
+): Promise<CdpCookie[]> {
+  const wsUrl = await resolveCdpWebSocketUrl(cdpBase);
+  const client = await CdpClient.connect(wsUrl, timeoutMs);
+  try {
+    const response = await client.send<{ cookies: CdpCookie[] }>("Network.getCookies", { urls });
+    return response.cookies ?? [];
+  } finally {
+    client.close();
+  }
+}
+
+export async function evaluateInCdpPage<T>(
+  cdpBase: string,
+  expression: string,
+  timeoutMs = 10_000,
+): Promise<T> {
+  const wsUrl = await resolveCdpWebSocketUrl(cdpBase);
+  const client = await CdpClient.connect(wsUrl, timeoutMs);
+  try {
+    const response = await client.send<{
+      result?: { value?: T };
+      exceptionDetails?: { text?: string };
+    }>("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (response.exceptionDetails) {
+      throw new ProError(
+        "CDP_EVALUATION_FAILED",
+        response.exceptionDetails.text ?? "Chrome page evaluation failed.",
+        {
+          exitCode: EXIT.auth,
+          suggestions: ["Open the logged-in ChatGPT page and retry auth capture."],
+        },
+      );
+    }
+    return response.result?.value as T;
+  } finally {
+    client.close();
+  }
+}
+
+async function resolveCdpWebSocketUrl(cdpBase: string): Promise<string> {
+  const base = cdpBase.replace(/\/$/, "");
+  const pageWsUrl = await resolvePageWebSocketUrl(base);
+  if (pageWsUrl) return pageWsUrl;
+
+  let response: Response;
+  try {
+    response = await fetch(`${base}/json/version`);
+  } catch (error) {
+    throw new ProError("CDP_UNAVAILABLE", `Cannot connect to Chrome CDP at ${base}.`, {
+      exitCode: EXIT.auth,
+      suggestions: [
+        "Open Chrome with --remote-debugging-port=9222.",
+        "Run pro auth capture --cdp http://127.0.0.1:9222.",
+      ],
+      cause: error,
+    });
+  }
+  if (!response.ok) {
+    throw new ProError("CDP_UNAVAILABLE", `Chrome CDP returned HTTP ${response.status}.`, {
+      exitCode: EXIT.auth,
+      suggestions: ["Check the CDP URL and remote debugging port."],
+    });
+  }
+  const payload = (await response.json()) as { webSocketDebuggerUrl?: string };
+  if (!payload.webSocketDebuggerUrl) {
+    throw new ProError("CDP_UNAVAILABLE", "Chrome CDP did not expose a browser websocket.", {
+      exitCode: EXIT.auth,
+      suggestions: ["Use the browser-level CDP endpoint from /json/version."],
+    });
+  }
+  return payload.webSocketDebuggerUrl;
+}
+
+async function resolvePageWebSocketUrl(base: string): Promise<string | null> {
+  let response: Response;
+  try {
+    response = await fetch(`${base}/json`);
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  const targets = (await response.json().catch(() => [])) as Array<{
+    type?: string;
+    url?: string;
+    webSocketDebuggerUrl?: string;
+  }>;
+  const pages = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
+  const chatgpt = pages.find((target) => target.url?.startsWith("https://chatgpt.com/"));
+  return chatgpt?.webSocketDebuggerUrl ?? pages[0]?.webSocketDebuggerUrl ?? null;
+}
+
+class CdpClient {
+  private nextId = 1;
+  private readonly pending = new Map<
+    number,
+    {
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  private constructor(
+    private readonly socket: WebSocket,
+    private readonly timeoutMs: number,
+  ) {
+    this.socket.addEventListener("message", (event) => this.handleMessage(String(event.data)));
+    this.socket.addEventListener("error", () => this.rejectAll("CDP websocket error."));
+    this.socket.addEventListener("close", () => this.rejectAll("CDP websocket closed."));
+  }
+
+  static async connect(url: string, timeoutMs: number): Promise<CdpClient> {
+    const socket = new WebSocket(url);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("CDP websocket open timed out.")), timeoutMs);
+      socket.addEventListener("open", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      socket.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("CDP websocket failed to open."));
+      });
+    }).catch((error) => {
+      throw new ProError("CDP_UNAVAILABLE", "Cannot open Chrome CDP websocket.", {
+        exitCode: EXIT.auth,
+        suggestions: ["Confirm Chrome is running with remote debugging enabled."],
+        cause: error,
+      });
+    });
+    return new CdpClient(socket, timeoutMs);
+  }
+
+  async send<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+    const id = this.nextId;
+    this.nextId += 1;
+    const payload = JSON.stringify({ id, method, params });
+    const result = new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(
+          new ProError("CDP_TIMEOUT", `Chrome CDP command ${method} timed out.`, {
+            exitCode: EXIT.timeout,
+            suggestions: ["Retry auth capture or restart the CDP Chrome instance."],
+          }),
+        );
+      }, this.timeoutMs);
+      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+    });
+    this.socket.send(payload);
+    return result;
+  }
+
+  close(): void {
+    this.socket.close();
+  }
+
+  private handleMessage(raw: string): void {
+    const message = JSON.parse(raw) as JsonRpcResponse<unknown>;
+    if (!message.id) return;
+    const pending = this.pending.get(message.id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pending.delete(message.id);
+    if (message.error) {
+      pending.reject(
+        new ProError("CDP_COMMAND_FAILED", message.error.message, {
+          exitCode: EXIT.auth,
+          suggestions: ["Retry with a fresh logged-in Chrome/CDP session."],
+          details: { cdpCode: message.error.code },
+        }),
+      );
+      return;
+    }
+    pending.resolve(message.result);
+  }
+
+  private rejectAll(message: string): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    this.pending.clear();
+  }
+}
