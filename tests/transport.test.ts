@@ -53,6 +53,7 @@ describe("ChatGPT transport", () => {
       expect(expression).toContain('"history_and_training_disabled":true');
       expect(expression).toContain('"reasoning_effort":"low"');
       expect(expression).toContain("Use terse answers.\\n\\nReply with OK only.");
+      expect(expression).not.toContain("header.");
     });
   });
 
@@ -129,6 +130,22 @@ describe("ChatGPT transport", () => {
         ({ ok: false, status: 429, body: "<html>limit</html>" }) as T);
 
       await expect(runChatGptJob(job(), { sessionTokenPath, pageEvaluator })).rejects.toThrow(ProError);
+    });
+  });
+
+  test("fails early when the CDP ChatGPT page is logged out", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: false,
+          status: 200,
+          body: "ChatGPT page session did not include an access token.",
+          code: "CHATGPT_PAGE_LOGGED_OUT",
+        }) as T);
+
+      await expect(runChatGptJob(job(), { sessionTokenPath, pageEvaluator })).rejects.toThrow(
+        "The ChatGPT CDP page is not logged in.",
+      );
     });
   });
 });

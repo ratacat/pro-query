@@ -371,7 +371,7 @@ function requestBodyFromExpression(expression: string): Record<string, unknown> 
   const start = expression.lastIndexOf(marker);
   expect(start).toBeGreaterThanOrEqual(0);
   const bodyStart = start + marker.length;
-  const bodyEnd = expression.indexOf(', "header.', bodyStart);
+  const bodyEnd = expression.lastIndexOf(', "acct_test")');
   expect(bodyEnd).toBeGreaterThan(bodyStart);
   return JSON.parse(expression.slice(bodyStart, bodyEnd)) as Record<string, unknown>;
 }

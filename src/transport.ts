@@ -45,7 +45,7 @@ export async function runChatGptJob(job: JobRecord, options: TransportOptions): 
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      return await postChatGptJob(job, { accessToken: session.accessToken, accountId: session.accountId }, options);
+      return await postChatGptJob(job, { accountId: session.accountId }, options);
     } catch (error) {
       const proError = error instanceof ProError ? error : networkError(error);
       lastError = proError;
@@ -59,7 +59,7 @@ export async function runChatGptJob(job: JobRecord, options: TransportOptions): 
 
 async function postChatGptJob(
   job: JobRecord,
-  session: { accessToken: string; accountId: string },
+  session: { accountId: string },
   options: TransportOptions,
 ): Promise<string> {
   const timeoutMs = integerOption(options.timeoutMs ?? job.options.timeoutMs, 0, 0, 30 * 60_000) ?? 0;
@@ -68,7 +68,7 @@ async function postChatGptJob(
     const evaluate = options.pageEvaluator ?? evaluateInCdpPage;
     const browserResult = await evaluate<BrowserFetchResult>(
       options.cdpBase ?? DEFAULT_CDP_BASE,
-      buildBrowserFetchExpression(buildRequestBody(job), session.accessToken, session.accountId),
+      buildBrowserFetchExpression(buildRequestBody(job), session.accountId),
       timeoutMs || 30 * 60_000,
     );
 
@@ -81,6 +81,18 @@ async function postChatGptJob(
           "Pass --cdp if Chrome is using a non-default CDP port.",
         ],
         details: { cdpBase: options.cdpBase ?? DEFAULT_CDP_BASE },
+      });
+    }
+
+    if (browserResult.code === "CHATGPT_PAGE_LOGGED_OUT") {
+      throw new ProError("CHATGPT_PAGE_LOGGED_OUT", "The ChatGPT CDP page is not logged in.", {
+        exitCode: EXIT.auth,
+        suggestions: [
+          "Sign in to ChatGPT in the Chrome window from pro auth command.",
+          "Run pro auth capture --cdp http://127.0.0.1:9222 --json after login.",
+          "Retry pro run with the same --cdp value.",
+        ],
+        details: { status: browserResult.status },
       });
     }
 
@@ -106,18 +118,13 @@ interface BrowserFetchResult {
   ok: boolean;
   status: number;
   body: string;
-  code?: "CHATGPT_PAGE_MISSING";
+  code?: "CHATGPT_PAGE_MISSING" | "CHATGPT_PAGE_LOGGED_OUT";
 }
 
-function buildBrowserFetchExpression(
-  requestBody: Record<string, unknown>,
-  accessToken: string,
-  accountId: string,
-): string {
+function buildBrowserFetchExpression(requestBody: Record<string, unknown>, accountId: string): string {
   return `(${async function browserFetch(
     endpoint: string,
     body: Record<string, unknown>,
-    token: string,
     account: string,
   ): Promise<BrowserFetchResult> {
     if (location.origin !== "https://chatgpt.com") {
@@ -129,9 +136,20 @@ function buildBrowserFetchExpression(
       };
     }
 
+    const sessionResponse = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
+    const session = (await sessionResponse.json().catch(() => null)) as { accessToken?: unknown } | null;
+    if (!sessionResponse.ok || typeof session?.accessToken !== "string" || !session.accessToken) {
+      return {
+        ok: false,
+        status: sessionResponse.status,
+        code: "CHATGPT_PAGE_LOGGED_OUT",
+        body: "ChatGPT page session did not include an access token.",
+      };
+    }
+
     const headers: Record<string, string> = {
       accept: "text/event-stream",
-      authorization: `Bearer ${token}`,
+      authorization: `Bearer ${session.accessToken}`,
       "content-type": "application/json",
       "oai-language": navigator.language || "en-US",
       originator: "pro-cli",
@@ -146,7 +164,7 @@ function buildBrowserFetchExpression(
     });
     const text = await response.text().catch((error) => String(error));
     return { ok: response.ok, status: response.status, body: text };
-  }})(${JSON.stringify(CHATGPT_CONVERSATION_ENDPOINT)}, ${JSON.stringify(requestBody)}, ${JSON.stringify(accessToken)}, ${JSON.stringify(accountId)})`;
+  }})(${JSON.stringify(CHATGPT_CONVERSATION_ENDPOINT)}, ${JSON.stringify(requestBody)}, ${JSON.stringify(accountId)})`;
 }
 
 function buildRequestBody(job: JobRecord): Record<string, unknown> {
