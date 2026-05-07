@@ -1,18 +1,25 @@
 {
   "name": "pro-cli",
   "version": "0.1.0",
-  "description": "Local robot-friendly CLI for querying ChatGPT from a consented logged-in browser session.",
+  "description": "Agent-friendly CLI for querying ChatGPT Pro and Deep Research through your own logged-in web session.",
   "type": "module",
   "homepage": "https://github.com/ratacat/pro-cli#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ratacat/pro-cli.git"
   },
+  "bugs": {
+    "url": "https://github.com/ratacat/pro-cli/issues"
+  },
   "keywords": [
     "chatgpt",
+    "chatgpt-pro",
+    "deep-research",
     "cli",
     "bun",
-    "agents"
+    "typescript",
+    "agents",
+    "automation"
   ],
   "bin": {
     "pro": "./src/cli.ts"

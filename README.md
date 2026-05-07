@@ -1,104 +1,93 @@
 # pro-cli
 
-`pro-cli` installs the `pro` command: a local CLI for querying ChatGPT from a paid, logged-in web account.
-It is built for developers and AI coding agents that need a scriptable terminal
-interface without copying prompts into the browser.
+`pro-cli` installs `pro`: a local, agent-friendly CLI for asking your own ChatGPT Pro web account from terminal workflows.
 
-The important constraints:
+It gives coding agents a scriptable path to the ChatGPT Pro surface you already use in the browser: current Pro models, reasoning levels, Deep Research-style/tool-backed capabilities when available to your account, and JSON-first job control.
 
-- you approve and control the browser session
-- auth files stay on your machine under `~/.pro` by default
-- raw cookies and tokens are not printed by status, jobs, or doctor commands
-- requests go to `https://chatgpt.com`
-- no runtime dependencies beyond Bun
-
-## Status
-
-This is an early local tool. It is not an official OpenAI API, and ChatGPT web
-endpoints can change. `pro` is designed to fail loudly with structured errors
-when auth expires, the web backend changes, or a stream is interrupted.
+`pro` is built for legal ChatGPT subscribers using their own session. It does not bypass authentication, subscriptions, rate limits, access controls, or account restrictions.
 
 ## Install
 
-From source:
+Requires Bun.
 
 ```sh
-git clone https://github.com/ratacat/pro-cli
-cd pro-cli
-bun install
-bun link
-pro setup
+mkdir -p "$HOME/Projects" && cd "$HOME/Projects" && if [ -d pro-cli/.git ]; then git -C pro-cli pull --ff-only; else git clone https://github.com/ratacat/pro-cli.git pro-cli; fi && cd pro-cli && bun install && bun link
 ```
 
-For agents, use JSON from the start:
+Rerun the same command to fast-forward an existing clone before relinking.
+
+## Auth Paths
+
+`pro` needs a logged-in ChatGPT Pro browser session before agents can use it. Choose one path.
+
+Quick path: if you are already logged in to ChatGPT in Chrome and you trust the current agent with temporary access to your local browser profile, ask the agent to capture scoped ChatGPT auth for `pro-cli`. The agent should only export ChatGPT/OpenAI cookies and the ChatGPT page session token, store them under `~/.pro`, and avoid printing raw values.
+
+Copyable request:
+
+```txt
+I am logged in to ChatGPT in Chrome. Set up pro-cli auth from my existing Chrome profile. Store only scoped ChatGPT/OpenAI auth under ~/.pro, do not print raw cookies or tokens, then verify with pro doctor --json.
+```
+
+Manual path: if you do not want an agent touching your normal browser profile, use a dedicated Chrome profile for `pro`.
 
 ```sh
-pro setup --json
+pro auth command --json
 ```
 
-## First Run
-
-`pro setup` shows the current state and the next command to run. The safe path is
-to use a dedicated Chrome profile for ChatGPT instead of exposing your normal
-browser profile over CDP.
-
-```sh
-pro auth command
-```
-
-On macOS this prints a command like:
-
-```sh
-open -na "Google Chrome" --args --user-data-dir='~/.pro/chrome-profile' --remote-debugging-port=9222 https://chatgpt.com/
-```
-
-Then:
-
-1. Open the printed Chrome command.
-2. Sign in to ChatGPT in that Chrome window.
-3. Capture auth:
+Run the returned Chrome command yourself, sign in to ChatGPT in that window, then capture auth from that dedicated profile:
 
 ```sh
 pro auth capture --cdp http://127.0.0.1:9222 --json
 pro doctor --json
 ```
 
-Run a smoke query:
+## Agent Blurb
 
-```sh
-pro run "Reply with OK only." --reasoning low --verbosity low --json
+Put this in the highest shared agent instructions file you control, such as a user-level `AGENTS.md` or `CLAUDE.md`, so agents in any project can use it:
+
+```md
+Use `pro` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro submit @prompt.md --reasoning high --json`, then `pro wait <job-id> --json` and `pro result <job-id> --json`. If auth is missing, run `pro setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro`.
 ```
 
 ## Daily Use
 
-One-shot query:
+`pro` is designed for your agent to operate. These are the commands an agent should run while working inside any repo. Agents should use `--json`; non-TTY stdout switches to JSON automatically.
+
+Setup and auth:
 
 ```sh
-pro run "Reply with OK only." --reasoning low --json
+pro setup --json
+pro auth command --json
+pro auth capture --cdp http://127.0.0.1:9222 --json
+pro doctor --json
 ```
 
-Prompt from a file:
+Models and capabilities:
 
 ```sh
-pro run @prompt.md --model auto --reasoning medium --json
+pro models --json
+pro config get --json
+pro config set model auto --json
+pro config set reasoning high --json
 ```
 
-Async job:
+Async work:
 
 ```sh
-pro submit @prompt.md --reasoning high --json
+pro submit @prompt.md --model auto --reasoning high --json
 pro wait <job-id> --wait-timeout 60000 --json
 pro result <job-id> --json
+pro cancel <job-id> --json
+pro jobs --limit 20 --json
 ```
 
-`submit` starts a detached worker by default and returns immediately. Pass
-`--no-start` to only create a queued job. Worker logs are stored under
-`~/.pro/workers/`.
+Direct work, when the caller wants to block:
 
-## Request Controls
+```sh
+pro run @prompt.md --model auto --reasoning high --json
+```
 
-Supported controls are intentionally limited to fields validated against the
-current ChatGPT backend:
+Request controls:
 
 ```sh
 --model auto|gpt-5.5|...
@@ -114,110 +103,12 @@ current ChatGPT backend:
 --retry-delay <ms>
 ```
 
-Unsupported request flags are rejected instead of silently ignored. For example,
-this endpoint currently rejects sampling controls such as `temperature`,
-`top_p`, and `max_output_tokens`.
+Unsupported request flags fail loudly instead of being ignored. Errors include `code`, `message`, and `suggestions`.
 
-## Commands
+## Safety
 
-```sh
-pro setup
-pro auth command
-pro auth capture
-pro auth status
-pro doctor
-pro models
-pro run "prompt"
-pro submit "prompt"
-pro status <job-id>
-pro wait <job-id>
-pro result <job-id>
-pro cancel <job-id>
-pro jobs
-pro config get
-pro config set model auto
-pro config set reasoning low
-```
+`pro` uses a browser session you control. The recommended setup opens a dedicated Chrome profile for ChatGPT, captures scoped ChatGPT/OpenAI cookies plus the page session token, and stores them locally under `~/.pro`.
 
-Every command supports `--json`. Non-TTY stdout automatically switches to JSON.
-Errors include `code`, `message`, and `suggestions`.
+Treat `~/.pro` like SSH keys or browser session data. Do not commit it, paste it, sync it to other machines, or share it with other users.
 
-Exit codes:
-
-- `0`: success
-- `1`: not found or not ready
-- `2`: invalid arguments
-- `3`: auth required or expired
-- `4`: upstream rejected the request
-- `5`: network or interrupted stream
-- `6`: timeout
-- `7`: internal error
-
-## Safety Model
-
-`pro auth capture` writes sensitive local files:
-
-- scoped ChatGPT/OpenAI cookie JSON
-- Netscape cookie jar
-- ChatGPT session-token JSON
-- SQLite job database
-- worker logs
-
-Defaults:
-
-- home: `~/.pro`
-- cookies: `~/.pro/cookies/`
-- token: `~/.pro/tokens/chatgpt-session.json`
-- jobs: `~/.pro/jobs.sqlite`
-- worker logs: `~/.pro/workers/`
-
-Files are written with private permissions where the OS supports it: `0600` for
-files and `0700` for directories.
-
-Do not commit, paste, or share `~/.pro`. Treat it like SSH keys or browser
-session data. `pro` does not print raw cookie or token values in normal status,
-doctor, jobs, or list output.
-
-## Troubleshooting
-
-Auth missing or expired:
-
-```sh
-pro setup --json
-pro auth command
-pro auth capture --cdp http://127.0.0.1:9222 --json
-```
-
-See available models and reasoning modes:
-
-```sh
-pro models --json
-```
-
-Check whether the CLI is ready:
-
-```sh
-pro doctor --json
-```
-
-Inspect recent jobs without dumping full prompts or outputs:
-
-```sh
-pro jobs --limit 5 --json
-```
-
-Get the full output only when needed:
-
-```sh
-pro result <job-id> --json
-```
-
-## Design Notes
-
-`pro` uses Chrome DevTools Protocol only to read a user-consented logged-in
-ChatGPT page. It captures the page session token and scoped cookies, stores them
-locally, and sends requests back to ChatGPT’s web backend.
-
-This project is for legal ChatGPT subscribers using their own subscription. It
-does not bypass authentication, subscriptions, rate limits, access controls, or
-account restrictions.
+Normal setup, doctor, job, and status output redacts raw cookies and tokens. Files are written with private permissions where the OS supports them: `0600` for files and `0700` for directories. Requests go to `https://chatgpt.com`.
