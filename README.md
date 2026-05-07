@@ -8,27 +8,31 @@ It gives coding agents a scriptable path to the ChatGPT Pro surface you already 
 
 ## Install
 
-Requires Bun.
+Requires Bun. `pro-cli` has been tested on macOS. Windows may work, but the install and Chrome auth commands may need adjustment.
+
+Run this from the directory where you want the `pro-cli` checkout to live:
 
 ```sh
-mkdir -p "$HOME/Projects" && cd "$HOME/Projects" && if [ -d pro-cli/.git ]; then git -C pro-cli pull --ff-only; else git clone https://github.com/ratacat/pro-cli.git pro-cli; fi && cd pro-cli && bun install && bun link
+if [ -d pro-cli/.git ]; then git -C pro-cli pull --ff-only; else git clone https://github.com/ratacat/pro-cli.git; fi && cd pro-cli && bun install && bun link
 ```
 
 Rerun the same command to fast-forward an existing clone before relinking.
 
 ## Auth Paths
 
-`pro` needs a logged-in ChatGPT Pro browser session before agents can use it. Choose one path.
+`pro` needs a logged-in ChatGPT Pro browser session before agents can use it. Choose one of these paths.
 
-Quick path: if you are already logged in to ChatGPT in Chrome and you trust the current agent with temporary access to your local browser profile, ask the agent to capture scoped ChatGPT auth for `pro-cli`. The agent should only export ChatGPT/OpenAI cookies and the ChatGPT page session token, store them under `~/.pro`, and avoid printing raw values.
+**Option A: Quick Auth**
 
-Copyable request:
+Use this if you are already logged in to ChatGPT in Chrome and you trust the current agent with temporary access to your local browser profile. Copy this into your AI agent:
 
 ```txt
 I am logged in to ChatGPT in Chrome. Set up pro-cli auth from my existing Chrome profile. Store only scoped ChatGPT/OpenAI auth under ~/.pro, do not print raw cookies or tokens, then verify with pro doctor --json.
 ```
 
-Manual path: if you do not want an agent touching your normal browser profile, use a dedicated Chrome profile for `pro`.
+**Option B: Manual Auth**
+
+Use this if you do not want an agent touching your normal browser profile. It uses a dedicated Chrome profile for `pro`. Copy these commands into your terminal:
 
 ```sh
 pro auth command --json
@@ -41,7 +45,7 @@ pro auth capture --cdp http://127.0.0.1:9222 --json
 pro doctor --json
 ```
 
-## Agent Blurb
+## Agents File
 
 Put this in the highest shared agent instructions file you control, such as a user-level `AGENTS.md` or `CLAUDE.md`, so agents in any project can use it:
 
