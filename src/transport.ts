@@ -1,9 +1,18 @@
+import { randomUUID } from "node:crypto";
+import { evaluateInCdpPage } from "./cdp";
 import { EXIT, ProError } from "./errors";
 import type { JobRecord } from "./jobs";
 import { isTokenFresh, loadSessionToken } from "./session-token";
 
+const CHATGPT_CONVERSATION_ENDPOINT = "https://chatgpt.com/backend-api/conversation";
+const DEFAULT_CDP_BASE = "http://127.0.0.1:9222";
+
+type PageEvaluator = <T>(cdpBase: string, expression: string, timeoutMs?: number) => Promise<T>;
+
 export interface TransportOptions {
   sessionTokenPath: string;
+  cdpBase?: string;
+  pageEvaluator?: PageEvaluator;
   timeoutMs?: number;
   retries?: number;
   retryDelayMs?: number;
@@ -54,126 +63,195 @@ async function postChatGptJob(
   options: TransportOptions,
 ): Promise<string> {
   const timeoutMs = integerOption(options.timeoutMs ?? job.options.timeoutMs, 0, 0, 30 * 60_000) ?? 0;
-  const controller = timeoutMs > 0 ? new AbortController() : null;
-  const timeout = controller
-    ? setTimeout(() => controller.abort(new Error("ChatGPT request timed out.")), timeoutMs)
-    : null;
 
   try {
-    const response = await fetch("https://chatgpt.com/backend-api/codex/responses", {
-      method: "POST",
-      signal: controller?.signal,
-      headers: {
-        authorization: `Bearer ${session.accessToken}`,
-        "chatgpt-account-id": session.accountId,
-        "openai-beta": "responses=experimental",
-        originator: "pro-cli",
-        accept: "text/event-stream",
-        "content-type": "application/json",
-        origin: "https://chatgpt.com",
-        referer: "https://chatgpt.com/",
-        "user-agent": "pro-cli/0.1",
-      },
-      body: JSON.stringify(buildRequestBody(job)),
-    });
+    const evaluate = options.pageEvaluator ?? evaluateInCdpPage;
+    const browserResult = await evaluate<BrowserFetchResult>(
+      options.cdpBase ?? DEFAULT_CDP_BASE,
+      buildBrowserFetchExpression(buildRequestBody(job), session.accessToken, session.accountId),
+      timeoutMs || 30 * 60_000,
+    );
 
-    if (!response.ok || !response.body) {
-      const text = await response.text().catch(() => "");
-      throw new ProError("UPSTREAM_REJECTED", `ChatGPT backend returned HTTP ${response.status}.`, {
+    if (browserResult.code === "CHATGPT_PAGE_MISSING") {
+      throw new ProError("CHATGPT_PAGE_MISSING", "No logged-in ChatGPT page is available over CDP.", {
+        exitCode: EXIT.auth,
+        suggestions: [
+          "Open the Chrome command from pro auth command.",
+          "Confirm the CDP Chrome window is on https://chatgpt.com/ and logged in.",
+          "Pass --cdp if Chrome is using a non-default CDP port.",
+        ],
+        details: { cdpBase: options.cdpBase ?? DEFAULT_CDP_BASE },
+      });
+    }
+
+    if (!browserResult.ok) {
+      throw new ProError("UPSTREAM_REJECTED", `ChatGPT backend returned HTTP ${browserResult.status}.`, {
         exitCode: EXIT.upstream,
         suggestions: ["Run pro auth capture again.", "Check whether the ChatGPT Pro usage limit is reached."],
-        details: { status: response.status, preview: text.slice(0, 160).replace(/\s+/g, " ") },
+        details: {
+          status: browserResult.status,
+          preview: browserResult.body.slice(0, 160).replace(/\s+/g, " "),
+        },
       });
     }
 
-    return await readResponseStream(response);
+    return readResponseText(browserResult.body);
   } catch (error) {
-    if (controller?.signal.aborted) {
-      throw new ProError("REQUEST_TIMEOUT", `ChatGPT request exceeded ${timeoutMs}ms.`, {
-        exitCode: EXIT.timeout,
-        suggestions: ["Increase --timeout or retry with a smaller prompt."],
-        cause: error,
-      });
-    }
     if (error instanceof ProError) throw error;
     throw networkError(error);
-  } finally {
-    if (timeout) clearTimeout(timeout);
   }
 }
 
+interface BrowserFetchResult {
+  ok: boolean;
+  status: number;
+  body: string;
+  code?: "CHATGPT_PAGE_MISSING";
+}
+
+function buildBrowserFetchExpression(
+  requestBody: Record<string, unknown>,
+  accessToken: string,
+  accountId: string,
+): string {
+  return `(${async function browserFetch(
+    endpoint: string,
+    body: Record<string, unknown>,
+    token: string,
+    account: string,
+  ): Promise<BrowserFetchResult> {
+    if (location.origin !== "https://chatgpt.com") {
+      return {
+        ok: false,
+        status: 0,
+        code: "CHATGPT_PAGE_MISSING",
+        body: `Expected https://chatgpt.com, got ${location.href}`,
+      };
+    }
+
+    const headers: Record<string, string> = {
+      accept: "text/event-stream",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "oai-language": navigator.language || "en-US",
+      originator: "pro-cli",
+    };
+    if (account) headers["chatgpt-account-id"] = account;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify(body),
+    });
+    const text = await response.text().catch((error) => String(error));
+    return { ok: response.ok, status: response.status, body: text };
+  }})(${JSON.stringify(CHATGPT_CONVERSATION_ENDPOINT)}, ${JSON.stringify(requestBody)}, ${JSON.stringify(accessToken)}, ${JSON.stringify(accountId)})`;
+}
+
 function buildRequestBody(job: JobRecord): Record<string, unknown> {
-  const model = job.model === "auto" ? "gpt-5.5" : job.model;
+  const model = stringOption(job.model) ?? "auto";
+  const prompt = buildConversationPrompt(job);
+  const reasoningEffort = normalizeReasoning(job.reasoning);
   const body: Record<string, unknown> = {
-    model,
-    store: booleanOption(job.options.store, false),
-    stream: true,
-    instructions:
-      stringOption(job.options.instructions) ??
-      "You are a concise assistant responding to a terminal automation request.",
-    input: [
+    action: "next",
+    messages: [
       {
-        role: "user",
-        content: [{ type: "input_text", text: job.prompt }],
+        id: randomUUID(),
+        author: { role: "user" },
+        content: { content_type: "text", parts: [prompt] },
+        metadata: {},
       },
     ],
-    text: { verbosity: normalizeVerbosity(stringOption(job.options.verbosity) ?? "medium") },
-    include: ["reasoning.encrypted_content"],
-    tool_choice: normalizeToolChoice(stringOption(job.options.toolChoice) ?? "auto"),
-    parallel_tool_calls: booleanOption(job.options.parallelTools, true),
-    reasoning: {
-      effort: normalizeReasoning(job.reasoning),
-      summary: normalizeReasoningSummary(stringOption(job.options.reasoningSummary) ?? "auto"),
-    },
+    model,
+    parent_message_id: randomUUID(),
+    timezone_offset_min: new Date().getTimezoneOffset(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC",
+    suggestions: [],
+    history_and_training_disabled: !booleanOption(job.options.store, false),
+    conversation_mode: { kind: "primary_assistant" },
+    force_paragen: false,
+    force_paragen_model_slug: "",
+    force_rate_limit: false,
+    reset_rate_limits: false,
+    websocket_request_id: randomUUID(),
+    supports_buffering: true,
+    supported_encodings: ["v1"],
   };
+
+  if (reasoningEffort !== "auto") {
+    body.reasoning_effort = reasoningEffort;
+  }
 
   return body;
 }
 
-async function readResponseStream(response: Response): Promise<string> {
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let output = "";
+function buildConversationPrompt(job: JobRecord): string {
+  const instructions =
+    stringOption(job.options.instructions) ??
+    "You are a concise assistant responding to a terminal automation request.";
+  const prompt = job.prompt.trim();
+  if (!instructions.trim()) return prompt;
+  return `${instructions.trim()}\n\n${prompt}`;
+}
+
+function readResponseText(raw: string): string {
+  let buffer = raw;
   let completedText: string | null = null;
   let completed = false;
 
-  for await (const chunk of response.body as ReadableStream<Uint8Array>) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const frame = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      const event = parseSseFrame(frame);
-      if (event) {
-        if (event.type === "error") {
-          throw new ProError("UPSTREAM_ERROR", readErrorMessage(event), {
-            exitCode: EXIT.upstream,
-            suggestions: ["Retry later or check usage limits."],
-          });
-        }
-        const delta = readDelta(event);
-        if (delta) output += delta;
-        const doneText = readOutputTextDone(event);
-        if (doneText !== null) completedText = doneText;
-        if (event.type === "response.completed") {
-          completed = true;
-          const finalText = readCompletedText(event);
-          if (finalText !== null) completedText = finalText;
-        }
-      }
-      boundary = buffer.indexOf("\n\n");
-    }
+  let boundary = buffer.indexOf("\n\n");
+  while (boundary !== -1) {
+    const frame = buffer.slice(0, boundary);
+    buffer = buffer.slice(boundary + 2);
+    const event = parseSseFrame(frame);
+    const parsed = readConversationEvent(event);
+    completedText = parsed.text ?? completedText;
+    completed = completed || parsed.completed;
+    boundary = buffer.indexOf("\n\n");
+  }
+
+  if (buffer.trim()) {
+    const event = parseSseFrame(buffer);
+    const parsed = readConversationEvent(event);
+    completedText = parsed.text ?? completedText;
+    completed = completed || parsed.completed;
   }
 
   if (!completed) {
-    throw new ProError("STREAM_INCOMPLETE", "ChatGPT stream ended before response.completed.", {
+    throw new ProError("STREAM_INCOMPLETE", "ChatGPT stream ended before the conversation completed.", {
       exitCode: EXIT.network,
       suggestions: ["Retry the job.", "Increase --timeout if the request is large."],
-      details: output ? { partialPreview: output.slice(0, 160) } : undefined,
+      details: completedText ? { partialPreview: completedText.slice(0, 160) } : undefined,
     });
   }
 
-  return completedText ?? output;
+  if (completedText === null) {
+    throw new ProError("EMPTY_RESPONSE", "ChatGPT completed without returning assistant text.", {
+      exitCode: EXIT.upstream,
+      suggestions: ["Retry the job.", "Check the job in ChatGPT if this persists."],
+    });
+  }
+
+  return completedText;
+}
+
+function readConversationEvent(event: Record<string, unknown> | null): {
+  text: string | null;
+  completed: boolean;
+} {
+  if (!event) return { text: null, completed: false };
+  if (event.type === "error") {
+    throw new ProError("UPSTREAM_ERROR", readErrorMessage(event), {
+      exitCode: EXIT.upstream,
+      suggestions: ["Retry later or check usage limits."],
+    });
+  }
+  const messageText = readConversationMessageText(event);
+  return {
+    text: messageText,
+    completed: event.type === "done" || isConversationMessageDone(event),
+  };
 }
 
 function parseSseFrame(frame: string): Record<string, unknown> | null {
@@ -182,57 +260,37 @@ function parseSseFrame(frame: string): Record<string, unknown> | null {
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice(5).trim())
     .join("\n");
-  if (!data || data === "[DONE]") return null;
+  if (!data) return null;
+  if (data === "[DONE]") return { type: "done" };
   return JSON.parse(data) as Record<string, unknown>;
 }
 
-function readDelta(event: Record<string, unknown>): string {
-  if (typeof event.delta === "string") return event.delta;
-  if (typeof event.text === "string" && String(event.type).includes("delta")) return event.text;
-  return "";
+function readConversationMessageText(event: Record<string, unknown>): string | null {
+  const message = event.message as { author?: unknown; content?: unknown } | undefined;
+  const author = message?.author as { role?: unknown } | undefined;
+  if (author?.role !== "assistant") return null;
+
+  const content = message?.content as { parts?: unknown } | undefined;
+  if (!Array.isArray(content?.parts)) return null;
+
+  const parts = content.parts.filter((part): part is string => typeof part === "string");
+  if (parts.length === 0) return null;
+  return parts.join("");
 }
 
-function readCompletedText(event: Record<string, unknown>): string | null {
-  if (event.type !== "response.completed") return null;
-  const response = event.response as { output?: unknown[] } | undefined;
-  const parts: string[] = [];
-  for (const item of response?.output ?? []) {
-    const content = (item as { content?: unknown[] }).content ?? [];
-    for (const part of content) {
-      const text = (part as { text?: unknown }).text;
-      if (typeof text === "string") parts.push(text);
-    }
-  }
-  return parts.length > 0 ? parts.join("") : null;
-}
-
-function readOutputTextDone(event: Record<string, unknown>): string | null {
-  if (event.type !== "response.output_text.done") return null;
-  return typeof event.text === "string" ? event.text : null;
+function isConversationMessageDone(event: Record<string, unknown>): boolean {
+  const message = event.message as { status?: unknown; end_turn?: unknown } | undefined;
+  return message?.status === "finished_successfully" || message?.end_turn === true;
 }
 
 function readErrorMessage(event: Record<string, unknown>): string {
+  if (typeof event.error === "string") return event.error;
   const error = event.error as { message?: unknown } | undefined;
   return typeof error?.message === "string" ? error.message : "ChatGPT backend returned an error event.";
 }
 
 function normalizeReasoning(reasoning: string): string {
-  if (["low", "medium", "high"].includes(reasoning)) return reasoning;
-  return "low";
-}
-
-function normalizeVerbosity(verbosity: string): string {
-  if (["low", "medium", "high"].includes(verbosity)) return verbosity;
-  return "medium";
-}
-
-function normalizeReasoningSummary(summary: string): string {
-  if (["auto", "concise", "detailed", "none"].includes(summary)) return summary;
-  return "auto";
-}
-
-function normalizeToolChoice(toolChoice: string): string {
-  if (["auto", "none", "required"].includes(toolChoice)) return toolChoice;
+  if (["auto", "low", "medium", "high"].includes(reasoning)) return reasoning;
   return "auto";
 }
 

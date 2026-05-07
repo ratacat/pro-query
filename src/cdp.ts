@@ -79,7 +79,7 @@ async function resolveCdpWebSocketUrl(cdpBase: string): Promise<string> {
       exitCode: EXIT.auth,
       suggestions: [
         "Open Chrome with --remote-debugging-port=9222.",
-        "Run pro auth capture --cdp http://127.0.0.1:9222.",
+        "Pass --cdp http://127.0.0.1:<port> if Chrome uses a different CDP port.",
       ],
       cause: error,
     });

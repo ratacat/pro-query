@@ -55,6 +55,8 @@ pro auth capture --cdp http://127.0.0.1:9222 --json
 pro doctor --json
 ```
 
+Keep the dedicated Chrome window open while using `pro run`, `pro submit`, or `pro wait`. The normal ChatGPT frontend request is executed inside that logged-in browser context.
+
 ## Agents File
 
 Put this in the highest shared agent instructions file you control, such as a user-level `AGENTS.md` or `CLAUDE.md`, so agents in any project can use it:
@@ -66,6 +68,8 @@ Use `pro` to ask my ChatGPT Pro web account for hard questions, extended thinkin
 ## Daily Use
 
 `pro` is designed for your agent to operate. These are the commands an agent should run while working inside any repo. Agents should use `--json`; non-TTY stdout switches to JSON automatically.
+
+`run`, `submit`, and `wait` default to `http://127.0.0.1:9222` for the active ChatGPT browser context. Pass `--cdp` or `--port` if the Chrome command used a different port.
 
 Setup and auth:
 
@@ -104,8 +108,10 @@ pro run @prompt.md --model auto --reasoning high --json
 Request controls:
 
 ```sh
---model auto|gpt-5.5|...
+--model auto|<id from pro models>
 --reasoning auto|low|medium|high
+--cdp http://127.0.0.1:9222
+--port 9222
 --verbosity low|medium|high
 --instructions "system text"
 --instructions-file prompt-system.txt

@@ -114,7 +114,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
             reasoning: flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto",
             options: await collectSubmitOptions(parsed.flags, io.cwd),
           });
-          const executed = await executeQueuedJob(store, created.id, paths.sessionTokenPath);
+          const executed = await executeQueuedJob(store, created.id, paths);
           writeSuccess(io, mode, executed);
           return EXIT.success;
         } finally {
@@ -126,7 +126,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         if (!jobId) throw invalidArgs("Missing job id.", ["Use pro worker <job-id>."]);
         const store = await JobStore.open(paths.dbPath);
         try {
-          writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths.sessionTokenPath));
+          writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths));
           return EXIT.success;
         } finally {
           store.close();
@@ -170,7 +170,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         try {
           const job = store.get(jobId);
           if (job.status === "queued") {
-            writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths.sessionTokenPath));
+            writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths));
             return EXIT.success;
           }
           if (job.status === "running") {
@@ -233,7 +233,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           ready,
           next: ready
             ? {
-                command: 'pro run "Reply with OK only." --json',
+                command: 'pro run "Reply with OK only." --cdp http://127.0.0.1:9222 --json',
                 reason: "Auth is present; run a smoke query.",
               }
             : {
@@ -243,7 +243,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           storage: { home: paths.home, dbPath: paths.dbPath },
           transport: {
             status: ready ? "configured" : "auth_required",
-            endpoint: "https://chatgpt.com/backend-api/codex/responses",
+            endpoint: "https://chatgpt.com/backend-api/conversation",
           },
           safety: safetySummary(),
         });
@@ -310,7 +310,7 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
       {
         id: "smoke-test",
         status: ready ? "todo" : "blocked",
-        command: 'pro run "Reply with OK only." --reasoning low --json',
+        command: `pro run "Reply with OK only." --cdp ${authCommand.cdp} --reasoning low --json`,
         note: "Verifies the live ChatGPT backend request path.",
       },
     ],
@@ -382,6 +382,9 @@ async function collectSubmitOptions(
   setIntegerOption(options, "retryDelayMs", flags, "retry-delay", 0, 60_000);
   setBooleanOption(options, "parallelTools", flags, "parallel-tools");
   setBooleanOption(options, "store", flags, "store");
+  const cdp = flagString(flags, "cdp");
+  const port = flagString(flags, "port");
+  if (cdp || port) options.cdpBase = defaultCdpBase(port, cdp);
 
   const instructions = flagString(flags, "instructions");
   const instructionsFile = flagString(flags, "instructions-file");
@@ -413,6 +416,8 @@ const SUBMIT_FLAGS = new Set([
   "retry-delay",
   "store",
   "no-start",
+  "cdp",
+  "port",
 ]);
 
 function rejectUnsupportedFlags(
@@ -432,13 +437,14 @@ function rejectUnsupportedFlags(
 async function executeQueuedJob(
   store: JobStore,
   jobId: string,
-  sessionTokenPath: string,
+  paths: ReturnType<typeof resolvePaths>,
 ): Promise<Record<string, unknown>> {
   const claimed = store.claimQueued(jobId);
   if (!claimed) return { job: redactJob(store.get(jobId)) };
   try {
     const result = await runChatGptJob(claimed, {
-      sessionTokenPath,
+      sessionTokenPath: paths.sessionTokenPath,
+      cdpBase: stringFromOption(claimed.options.cdpBase),
       timeoutMs: numberFromOption(claimed.options.timeoutMs),
       retries: numberFromOption(claimed.options.retries),
       retryDelayMs: numberFromOption(claimed.options.retryDelayMs),
@@ -569,6 +575,10 @@ function parseIntegerFlag(
 
 function numberFromOption(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+function stringFromOption(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 async function sleep(ms: number): Promise<void> {

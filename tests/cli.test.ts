@@ -5,9 +5,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { runCli } from "../src/app";
 
 const originalFetch = globalThis.fetch;
+const originalWebSocket = globalThis.WebSocket;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  globalThis.WebSocket = originalWebSocket;
 });
 
 interface RunResult {
@@ -235,14 +237,10 @@ describe("robot-mode CLI", () => {
         }),
       );
 
-      let requestBody: Record<string, unknown> = {};
-      globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return new Response(
-          'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}\n\n',
-          { status: 200, headers: { "content-type": "text/event-stream" } },
-        );
-      }) as unknown as typeof fetch;
+      let expression = "";
+      installFakeCdp(conversationStream("OK"), (script) => {
+        expression = script;
+      });
 
       const result = await run(
         [
@@ -268,8 +266,9 @@ describe("robot-mode CLI", () => {
       expect(payload.data.job.status).toBe("succeeded");
       expect(payload.data.job.prompt).toBe("");
       expect(payload.data.result).toBe("OK");
-      expect(requestBody.reasoning).toEqual({ effort: "high", summary: "auto" });
-      expect(requestBody.text).toEqual({ verbosity: "low" });
+      const requestBody = requestBodyFromExpression(expression);
+      expect(requestBody.reasoning_effort).toBe("high");
+      expect(requestBody).not.toHaveProperty("text");
     });
   });
 
@@ -287,11 +286,7 @@ describe("robot-mode CLI", () => {
           expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         }),
       );
-      globalThis.fetch = (async () =>
-        new Response(
-          'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}\n\n',
-          { status: 200, headers: { "content-type": "text/event-stream" } },
-        )) as unknown as typeof fetch;
+      installFakeCdp(conversationStream("OK"));
 
       const result = await run(["run", "hello"], { tty: true, home });
 
@@ -321,4 +316,70 @@ function fakeJwt(): string {
     "https://api.openai.com/auth": { chatgpt_account_id: "acct_test" },
   };
   return ["header", Buffer.from(JSON.stringify(payload)).toString("base64url"), "sig"].join(".");
+}
+
+function installFakeCdp(body: string, onExpression?: (expression: string) => void): void {
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const target = String(url);
+    if (target.endsWith("/json")) {
+      return Response.json([
+        {
+          type: "page",
+          url: "https://chatgpt.com/",
+          webSocketDebuggerUrl: "ws://fake-chatgpt-page",
+        },
+      ]);
+    }
+    if (target.endsWith("/json/version")) {
+      return Response.json({ webSocketDebuggerUrl: "ws://fake-browser" });
+    }
+    return new Response("unexpected fetch", { status: 500 });
+  }) as unknown as typeof fetch;
+
+  class FakeWebSocket extends EventTarget {
+    constructor(_url: string) {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+
+    send(raw: string): void {
+      const message = JSON.parse(raw) as { id: number; params?: { expression?: string } };
+      onExpression?.(message.params?.expression ?? "");
+      const response = {
+        id: message.id,
+        result: {
+          result: {
+            value: { ok: true, status: 200, body },
+          },
+        },
+      };
+      queueMicrotask(() =>
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(response) })),
+      );
+    }
+
+    close(): void {
+      this.dispatchEvent(new Event("close"));
+    }
+  }
+
+  globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+}
+
+function requestBodyFromExpression(expression: string): Record<string, unknown> {
+  const marker = '})("https://chatgpt.com/backend-api/conversation", ';
+  const start = expression.lastIndexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const bodyStart = start + marker.length;
+  const bodyEnd = expression.indexOf(', "header.', bodyStart);
+  expect(bodyEnd).toBeGreaterThan(bodyStart);
+  return JSON.parse(expression.slice(bodyStart, bodyEnd)) as Record<string, unknown>;
+}
+
+function conversationStream(text: string): string {
+  return [
+    `data: {"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":[${JSON.stringify(text)}]},"status":"finished_successfully"}}`,
+    "data: [DONE]",
+    "",
+  ].join("\n\n");
 }

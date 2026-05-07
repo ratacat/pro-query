@@ -1,16 +1,10 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { JobRecord } from "../src/jobs";
 import { runChatGptJob } from "../src/transport";
 import { ProError } from "../src/errors";
-
-const originalFetch = globalThis.fetch;
-
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
 
 async function withTokenFile<T>(fn: (path: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "pro-token-test-"));
@@ -34,59 +28,46 @@ async function withTokenFile<T>(fn: (path: string) => Promise<T>): Promise<T> {
 }
 
 describe("ChatGPT transport", () => {
-  test("posts Codex Responses request and parses streamed text deltas", async () => {
+  test("evaluates ChatGPT frontend conversation request inside the browser page", async () => {
     await withTokenFile(async (sessionTokenPath) => {
-      let requestBody: Record<string, unknown> = {};
-      let authHeader = "";
-      let accountHeader = "";
-      globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-        const headers = new Headers(init?.headers);
-        authHeader = headers.get("authorization") ?? "";
-        accountHeader = headers.get("chatgpt-account-id") ?? "";
-        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return new Response(
-          [
-            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"O"}',
-            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"K"}',
-            'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}',
-            "",
-          ].join("\n\n"),
-          { status: 200, headers: { "content-type": "text/event-stream" } },
-        );
-      }) as unknown as typeof fetch;
+      let cdpBase = "";
+      let expression = "";
+      const pageEvaluator = (async <T>(base: string, script: string): Promise<T> => {
+        cdpBase = base;
+        expression = script;
+        return { ok: true, status: 200, body: conversationStream("OK") } as T;
+      });
 
-      const result = await runChatGptJob(job(), { sessionTokenPath });
+      const result = await runChatGptJob(job(), {
+        sessionTokenPath,
+        cdpBase: "http://127.0.0.1:9225",
+        pageEvaluator,
+      });
 
       expect(result).toBe("OK");
-      expect(authHeader).toStartWith("Bearer ");
-      expect(accountHeader).toBe("acct_test");
-      expect(requestBody?.model).toBe("gpt-5.5");
-      expect(requestBody?.stream).toBe(true);
-      expect(requestBody?.instructions).toBe("Use terse answers.");
-      expect(requestBody?.text).toEqual({ verbosity: "high" });
-      expect(requestBody?.tool_choice).toBe("none");
-      expect(requestBody?.parallel_tool_calls).toBe(false);
-      expect(requestBody?.reasoning).toEqual({ effort: "low", summary: "detailed" });
+      expect(cdpBase).toBe("http://127.0.0.1:9225");
+      expect(expression).toContain("https://chatgpt.com/backend-api/conversation");
+      expect(expression).not.toContain("codex/responses");
+      expect(expression).toContain('"action":"next"');
+      expect(expression).toContain('"model":"auto"');
+      expect(expression).toContain('"history_and_training_disabled":true');
+      expect(expression).toContain('"reasoning_effort":"low"');
+      expect(expression).toContain("Use terse answers.\\n\\nReply with OK only.");
     });
   });
 
   test("retries transient upstream failures", async () => {
     await withTokenFile(async (sessionTokenPath) => {
       let attempts = 0;
-      globalThis.fetch = (async () => {
+      const pageEvaluator = (async <T>(): Promise<T> => {
         attempts += 1;
-        if (attempts === 1) return new Response("busy", { status: 503 });
-        return new Response(
-          [
-            'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}',
-            "",
-          ].join("\n\n"),
-          { status: 200, headers: { "content-type": "text/event-stream" } },
-        );
-      }) as unknown as typeof fetch;
+        if (attempts === 1) return { ok: false, status: 503, body: "busy" } as T;
+        return { ok: true, status: 200, body: conversationStream("OK") } as T;
+      });
 
       const result = await runChatGptJob(job(), {
         sessionTokenPath,
+        pageEvaluator,
         retries: 1,
         retryDelayMs: 0,
       });
@@ -99,25 +80,21 @@ describe("ChatGPT transport", () => {
   test("retries incomplete response streams", async () => {
     await withTokenFile(async (sessionTokenPath) => {
       let attempts = 0;
-      globalThis.fetch = (async () => {
+      const pageEvaluator = (async <T>(): Promise<T> => {
         attempts += 1;
         if (attempts === 1) {
-          return new Response('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n', {
+          return {
+            ok: true,
             status: 200,
-            headers: { "content-type": "text/event-stream" },
-          });
+            body: 'data: {"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":["partial"]},"status":"in_progress"}}\n\n',
+          } as T;
         }
-        return new Response(
-          [
-            'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}',
-            "",
-          ].join("\n\n"),
-          { status: 200, headers: { "content-type": "text/event-stream" } },
-        );
-      }) as unknown as typeof fetch;
+        return { ok: true, status: 200, body: conversationStream("OK") } as T;
+      });
 
       const result = await runChatGptJob(job(), {
         sessionTokenPath,
+        pageEvaluator,
         retries: 1,
         retryDelayMs: 0,
       });
@@ -127,21 +104,20 @@ describe("ChatGPT transport", () => {
     });
   });
 
-  test("accepts completed streams with final text in output_text.done", async () => {
+  test("accepts streams that only mark completion with DONE", async () => {
     await withTokenFile(async (sessionTokenPath) => {
-      globalThis.fetch = (async () =>
-        new Response(
-          [
-            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"O"}',
-            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"K"}',
-            'event: response.output_text.done\ndata: {"type":"response.output_text.done","text":"OK"}',
-            'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}',
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: [
+            'data: {"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":["OK"]},"status":"in_progress"}}',
+            "data: [DONE]",
             "",
           ].join("\n\n"),
-          { status: 200, headers: { "content-type": "text/event-stream" } },
-        )) as unknown as typeof fetch;
+        }) as T);
 
-      const result = await runChatGptJob(job(), { sessionTokenPath });
+      const result = await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
 
       expect(result).toBe("OK");
     });
@@ -149,13 +125,10 @@ describe("ChatGPT transport", () => {
 
   test("maps non-OK upstream responses to structured errors", async () => {
     await withTokenFile(async (sessionTokenPath) => {
-      globalThis.fetch = (async () =>
-        new Response("<html>limit</html>", {
-          status: 429,
-          headers: { "content-type": "text/html" },
-        })) as unknown as typeof fetch;
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({ ok: false, status: 429, body: "<html>limit</html>" }) as T);
 
-      await expect(runChatGptJob(job(), { sessionTokenPath })).rejects.toThrow(ProError);
+      await expect(runChatGptJob(job(), { sessionTokenPath, pageEvaluator })).rejects.toThrow(ProError);
     });
   });
 });
@@ -192,4 +165,12 @@ function fakeJwt(): string {
 
 function base64Url(value: string): string {
   return Buffer.from(value).toString("base64url");
+}
+
+function conversationStream(text: string): string {
+  return [
+    `data: {"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":[${JSON.stringify(text)}]},"status":"finished_successfully"}}`,
+    "data: [DONE]",
+    "",
+  ].join("\n\n");
 }
