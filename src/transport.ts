@@ -135,6 +135,7 @@ async function readResponseStream(response: Response): Promise<string> {
   let buffer = "";
   let output = "";
   let completedText: string | null = null;
+  let completed = false;
 
   for await (const chunk of response.body as ReadableStream<Uint8Array>) {
     buffer += decoder.decode(chunk, { stream: true });
@@ -153,10 +154,21 @@ async function readResponseStream(response: Response): Promise<string> {
         const delta = readDelta(event);
         if (delta) output += delta;
         const finalText = readCompletedText(event);
-        if (finalText) completedText = finalText;
+        if (finalText !== null) {
+          completed = true;
+          completedText = finalText;
+        }
       }
       boundary = buffer.indexOf("\n\n");
     }
+  }
+
+  if (!completed) {
+    throw new ProError("STREAM_INCOMPLETE", "ChatGPT stream ended before response.completed.", {
+      exitCode: EXIT.network,
+      suggestions: ["Retry the job.", "Increase --timeout if the request is large."],
+      details: output ? { partialPreview: output.slice(0, 160) } : undefined,
+    });
   }
 
   return completedText ?? output;
@@ -250,7 +262,7 @@ function networkError(error: unknown): ProError {
 }
 
 function isRetryable(error: ProError): boolean {
-  if (error.code === "NETWORK_ERROR" || error.code === "REQUEST_TIMEOUT") return true;
+  if (["NETWORK_ERROR", "REQUEST_TIMEOUT", "STREAM_INCOMPLETE"].includes(error.code)) return true;
   const status = error.details?.status;
   return typeof status === "number" && (status === 408 || status === 429 || status >= 500);
 }

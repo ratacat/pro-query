@@ -96,6 +96,37 @@ describe("ChatGPT transport", () => {
     });
   });
 
+  test("retries incomplete response streams", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      let attempts = 0;
+      globalThis.fetch = (async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return new Response('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n', {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response(
+          [
+            'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}',
+            "",
+          ].join("\n\n"),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }) as unknown as typeof fetch;
+
+      const result = await runChatGptJob(job(), {
+        sessionTokenPath,
+        retries: 1,
+        retryDelayMs: 0,
+      });
+
+      expect(result).toBe("OK");
+      expect(attempts).toBe(2);
+    });
+  });
+
   test("maps non-OK upstream responses to structured errors", async () => {
     await withTokenFile(async (sessionTokenPath) => {
       globalThis.fetch = (async () =>
