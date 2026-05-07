@@ -1,5 +1,9 @@
 # pro-cli
 
+<p align="center">
+  <img src="assets/readme/pro-cli-hero.jpg" alt="Neon ChatGPT Pro interface globe for pro-cli" width="100%">
+</p>
+
 `pro-cli` installs `pro`: a local, agent-friendly CLI for asking your own ChatGPT Pro web account from terminal workflows.
 
 It gives coding agents a scriptable path to the ChatGPT Pro surface you already use in the browser: current Pro models, reasoning levels, Deep Research-style/tool-backed capabilities when available to your account, and JSON-first job control.
@@ -22,23 +26,7 @@ To choose the checkout path:
 curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh | PRO_INSTALL_DIR="$HOME/Projects/pro-cli" bash
 ```
 
-To inspect before running:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh -o /tmp/pro-cli-install.sh
-less /tmp/pro-cli-install.sh
-bash /tmp/pro-cli-install.sh
-```
-
 The installer clones or fast-forwards `~/Projects/pro-cli`, runs `bun install`, runs `bun link`, and prints `pro --version`. It does not touch auth, cookies, Chrome, or `~/.pro`.
-
-Manual install:
-
-```sh
-if [ -d pro-cli/.git ]; then git -C pro-cli pull --ff-only; else git clone https://github.com/ratacat/pro-cli.git; fi && cd pro-cli && bun install && bun link
-```
-
-Rerun the same command to fast-forward an existing clone before relinking.
 
 ## Auth Paths
 
