@@ -55,17 +55,22 @@ pro auth capture --cdp http://127.0.0.1:9222 --json
 pro doctor --json
 ```
 
-Keep the dedicated Chrome window open while using `pro run`, `pro submit`, or `pro wait`. The normal ChatGPT frontend request is executed inside that logged-in browser context.
+Leave the dedicated Chrome window open while using `pro`.
 
 Port `9222` is the default. If that port is already in use, run `pro auth command --port 9223 --json`, keep using the returned `--cdp http://127.0.0.1:9223` value, and pass the same `--cdp` or `--port` to `pro doctor`, `pro run`, and `pro submit`. `pro wait` uses the CDP value stored on the submitted job.
 
-## Runtime Model
+## Keep Chrome Running
 
-`pro` is not a standalone ChatGPT daemon. It is a CLI that drives a real ChatGPT browser session through Chrome DevTools Protocol.
+What you need to do:
 
-That means one Chrome instance must be running with `--remote-debugging-port`, and that Chrome instance must have an open, logged-in `https://chatgpt.com/` tab while `pro run`, `pro submit`, `pro wait`, or a background worker is executing a job. `pro` sends the request from inside that page so it can use the same browser cookies, page session, frontend headers, and streaming/resume behavior as the ChatGPT web app.
+- Start the Chrome command from `pro auth command --json`.
+- Sign in to ChatGPT in that window.
+- Leave that window open while `pro` jobs run.
+- Run `pro doctor --json` when you are not sure whether it is ready.
 
-The recommended steady-state setup is:
+What is happening: `pro` submits requests from inside that logged-in ChatGPT tab over Chrome DevTools Protocol. That gives it the same browser cookies, page session, frontend headers, and streaming/resume behavior as the ChatGPT web app.
+
+The normal setup is:
 
 ```sh
 pro auth command --json
@@ -74,9 +79,9 @@ pro auth capture --cdp http://127.0.0.1:9222 --json
 pro doctor --cdp http://127.0.0.1:9222 --json
 ```
 
-Use the dedicated `~/.pro/chrome-profile` window returned by `pro auth command` for normal operation. Attaching CDP to a normal personal Chrome profile can work, but it gives the local agent access to that browser profile while the debugging port is open. The dedicated profile keeps the blast radius scoped to ChatGPT.
+Use the dedicated `~/.pro/chrome-profile` window for normal operation. A normal personal Chrome profile can work, but the debugging port exposes that profile while it is open. The dedicated profile keeps the scope limited to ChatGPT.
 
-Operationally, treat the dedicated Chrome window like a small local service: start it once, leave it open, and have agents run `pro doctor --json` before relying on it. If Chrome was closed, run `pro auth command --json` again. If ChatGPT logged out, sign in in that window and run `pro auth capture --cdp <url> --json` again.
+If Chrome was closed, run `pro auth command --json` again. If ChatGPT logged out, sign in in that window and rerun `pro auth capture --cdp <url> --json`.
 
 ## Agents File
 
