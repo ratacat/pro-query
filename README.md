@@ -4,7 +4,7 @@
   <img src="assets/readme/pro-cli-hero.jpg" alt="Neon ChatGPT Pro interface globe for pro-cli" width="100%">
 </p>
 
-`pro-cli` installs `pro`: a local, agent-friendly CLI for asking your own ChatGPT Pro web account from terminal workflows.
+`pro-cli` installs `pro`: an agent native CLI for querying ChatGPT Pro and Deep Research through your own logged-in web session, managed from your terminal.
 
 It gives coding agents a scriptable path to the ChatGPT Pro surface you already use in the browser: current Pro models, reasoning levels, Deep Research-style/tool-backed capabilities when available to your account, and JSON-first job control.
 
