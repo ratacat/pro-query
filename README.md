@@ -55,20 +55,13 @@ pro-cli auth capture --cdp http://127.0.0.1:9222 --json
 pro-cli doctor --json
 ```
 
-Leave the dedicated Chrome window open while using `pro-cli`.
-
 Port `9222` is the default. If that port is already in use, run `pro-cli auth command --port 9223 --json`, keep using the returned `--cdp http://127.0.0.1:9223` value, and pass the same `--cdp` or `--port` to `pro-cli doctor`, `pro-cli run`, and `pro-cli submit`. `pro-cli wait` uses the CDP value stored on the submitted job.
 
-## Keep Chrome Running
+## Live Browser Window
 
-What you need to do:
+After auth, keep the ChatGPT Chrome window open while jobs run. That window is the runtime. If you are not sure whether it is connected and logged in, run `pro-cli doctor --json`.
 
-- Start the Chrome command from `pro-cli auth command --json`.
-- Sign in to ChatGPT in that window.
-- Leave that window open while `pro-cli` jobs run.
-- Run `pro-cli doctor --json` when you are not sure whether it is ready.
-
-What is happening: `pro-cli` submits requests from inside that logged-in ChatGPT tab over Chrome DevTools Protocol. That gives it the same browser cookies, page session, frontend headers, and streaming/resume behavior as the ChatGPT web app.
+`pro-cli` sends requests from the logged-in tab over Chrome DevTools Protocol. The CLI gets the same cookies, page session, frontend headers, and streaming/resume behavior as ChatGPT in the browser.
 
 The normal setup is:
 
