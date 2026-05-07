@@ -30,7 +30,9 @@ The installer clones or fast-forwards `~/Projects/pro-cli`, runs `bun install`, 
 
 `pro-cli` needs one logged-in ChatGPT Chrome window. That window is the runtime.
 
-**Agent-assisted auth**
+Choose one auth path; you do not need both. Both end with the same local `pro-cli` auth state.
+
+**Agent-assisted auth: existing Chrome profile**
 
 Use this when you are already logged in to ChatGPT in Chrome and trust the current agent with temporary local browser access:
 
@@ -38,9 +40,11 @@ Use this when you are already logged in to ChatGPT in Chrome and trust the curre
 I am logged in to ChatGPT in Chrome. Set up pro-cli auth from my existing Chrome profile. Store only scoped ChatGPT/OpenAI auth under ~/.pro, do not print raw cookies or tokens, then verify with pro-cli doctor --json.
 ```
 
-**Manual auth**
+This is the lowest-friction path. It uses a browser profile that already has your ChatGPT session, so it also exposes that profile over Chrome DevTools Protocol while the CDP Chrome window is open.
 
-Use this when you want a dedicated browser profile:
+**Manual auth: dedicated Chrome profile**
+
+Use this when you want a separate browser profile for `pro-cli`:
 
 ```sh
 pro-cli auth command --json
@@ -52,6 +56,8 @@ Run the returned Chrome command, sign in to ChatGPT in that window, then capture
 pro-cli auth capture --cdp http://127.0.0.1:9222 --json
 pro-cli doctor --json
 ```
+
+This is the normal long-running path. It creates `~/.pro/chrome-profile`, keeps ChatGPT auth separate from your personal Chrome profile, and limits what the open debugging port can see.
 
 Port `9222` is the default. If you use another port, pass the same `--cdp` or `--port` to `doctor`, `run`, and `submit`. `wait` uses the CDP value stored on the job.
 
