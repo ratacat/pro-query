@@ -329,7 +329,7 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
         id: "open-chatgpt",
         status: ready ? "done" : "todo",
         command: authCommand.command,
-        note: "Uses a dedicated Chrome profile under ~/.pro so CDP is not attached to your main browser.",
+        note: "Starts the dedicated ~/.pro Chrome profile with CDP enabled; keep this window open while pro jobs run.",
       },
       {
         id: "capture-auth",
@@ -341,7 +341,7 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
         id: "smoke-test",
         status: ready ? "todo" : "blocked",
         command: `pro run "Reply with OK only." --cdp ${authCommand.cdp} --reasoning low --json`,
-        note: "Verifies the live ChatGPT backend request path.",
+        note: "Verifies the live ChatGPT tab, captured auth, CDP port, and backend request path.",
       },
     ],
     auth,
@@ -370,7 +370,7 @@ function buildAuthCommand(home: string, port: string): Record<string, unknown> {
     cdp,
     profileDir,
     port,
-    safety: "Recommended profile is dedicated to pro; do not expose a normal browser profile over CDP.",
+    safety: "Recommended profile is dedicated to pro; keep it open for jobs and do not expose a normal browser profile over CDP.",
   };
 }
 

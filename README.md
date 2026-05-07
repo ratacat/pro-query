@@ -59,12 +59,31 @@ Keep the dedicated Chrome window open while using `pro run`, `pro submit`, or `p
 
 Port `9222` is the default. If that port is already in use, run `pro auth command --port 9223 --json`, keep using the returned `--cdp http://127.0.0.1:9223` value, and pass the same `--cdp` or `--port` to `pro doctor`, `pro run`, and `pro submit`. `pro wait` uses the CDP value stored on the submitted job.
 
+## Runtime Model
+
+`pro` is not a standalone ChatGPT daemon. It is a CLI that drives a real ChatGPT browser session through Chrome DevTools Protocol.
+
+That means one Chrome instance must be running with `--remote-debugging-port`, and that Chrome instance must have an open, logged-in `https://chatgpt.com/` tab while `pro run`, `pro submit`, `pro wait`, or a background worker is executing a job. `pro` sends the request from inside that page so it can use the same browser cookies, page session, frontend headers, and streaming/resume behavior as the ChatGPT web app.
+
+The recommended steady-state setup is:
+
+```sh
+pro auth command --json
+# Run the returned Chrome command, sign in, and leave that window open.
+pro auth capture --cdp http://127.0.0.1:9222 --json
+pro doctor --cdp http://127.0.0.1:9222 --json
+```
+
+Use the dedicated `~/.pro/chrome-profile` window returned by `pro auth command` for normal operation. Attaching CDP to a normal personal Chrome profile can work, but it gives the local agent access to that browser profile while the debugging port is open. The dedicated profile keeps the blast radius scoped to ChatGPT.
+
+Operationally, treat the dedicated Chrome window like a small local service: start it once, leave it open, and have agents run `pro doctor --json` before relying on it. If Chrome was closed, run `pro auth command --json` again. If ChatGPT logged out, sign in in that window and run `pro auth capture --cdp <url> --json` again.
+
 ## Agents File
 
 Put this in the highest shared agent instructions file you control, such as a user-level `AGENTS.md` or `CLAUDE.md`, so agents in any project can use it:
 
 ```md
-Use `pro` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro submit @prompt.md --reasoning high --json`, then `pro wait <job-id> --json` and `pro result <job-id> --json`. If auth is missing, run `pro setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro`.
+Use `pro` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro submit @prompt.md --reasoning high --json`, then `pro wait <job-id> --json` and `pro result <job-id> --json`. `pro` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro doctor --json` first if unsure. If auth or the live browser is missing, run `pro setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro`.
 ```
 
 ## Daily Use
@@ -78,6 +97,7 @@ Setup and auth:
 ```sh
 pro setup --json
 pro auth command --json
+# Run the returned Chrome command, sign in, and leave that window open.
 pro auth capture --cdp http://127.0.0.1:9222 --json
 pro doctor --json
 ```
