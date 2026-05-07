@@ -1,8 +1,14 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { runCli } from "../src/app";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 interface RunResult {
   code: number;
@@ -116,7 +122,7 @@ describe("robot-mode CLI", () => {
 
   test("creates durable async jobs with redacted prompt preview", async () => {
     await withHome(async (home) => {
-      const submit = await run(["submit", "hello", "from", "agent", "--json"], {
+      const submit = await run(["submit", "hello", "from", "agent", "--no-start", "--json"], {
         tty: true,
         home,
       });
@@ -125,6 +131,7 @@ describe("robot-mode CLI", () => {
       const created = JSON.parse(submit.stdout);
       const jobId = created.data.job.id;
       expect(created.data.job.status).toBe("queued");
+      expect(created.data.worker.started).toBe(false);
       expect(created.data.job.prompt).toBe("");
       expect(created.data.job.promptPreview).toBe("hello from agent");
 
@@ -136,7 +143,7 @@ describe("robot-mode CLI", () => {
 
   test("wait marks queued jobs failed when session token is missing", async () => {
     await withHome(async (home) => {
-      const submit = await run(["submit", "hello", "--json"], { tty: true, home });
+      const submit = await run(["submit", "hello", "--no-start", "--json"], { tty: true, home });
       const jobId = JSON.parse(submit.stdout).data.job.id;
 
       const wait = await run(["wait", jobId, "--json"], { tty: true, home });
@@ -147,4 +154,79 @@ describe("robot-mode CLI", () => {
       expect(payload.data.error.code).toBe("SESSION_TOKEN_MISSING");
     });
   });
+
+  test("run creates a job, executes it, and returns the full result", async () => {
+    await withHome(async (home) => {
+      await mkdir(join(home, "tokens"), { recursive: true });
+      await writeFile(
+        join(home, "tokens", "chatgpt-session.json"),
+        JSON.stringify({
+          version: 1,
+          generatedAt: new Date().toISOString(),
+          source: "pro-cdp-page",
+          accessToken: fakeJwt(),
+          accountId: "acct_test",
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+      );
+
+      let requestBody: Record<string, unknown> = {};
+      globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }) as unknown as typeof fetch;
+
+      const result = await run(
+        [
+          "run",
+          "hello",
+          "--json",
+          "--reasoning",
+          "high",
+          "--verbosity",
+          "low",
+          "--timeout",
+          "1000",
+          "--retries",
+          "1",
+          "--retry-delay",
+          "0",
+        ],
+        { tty: true, home },
+      );
+
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.job.status).toBe("succeeded");
+      expect(payload.data.job.prompt).toBe("");
+      expect(payload.data.result).toBe("OK");
+      expect(requestBody.reasoning).toEqual({ effort: "high", summary: "auto" });
+      expect(requestBody.text).toEqual({ verbosity: "low" });
+    });
+  });
+
+  test("rejects unsupported request flags instead of silently ignoring them", async () => {
+    await withHome(async (home) => {
+      const result = await run(["submit", "hello", "--temperature", "0.2", "--json"], {
+        tty: true,
+        home,
+      });
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("Unsupported --temperature");
+    });
+  });
 });
+
+function fakeJwt(): string {
+  const payload = {
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct_test" },
+  };
+  return ["header", Buffer.from(JSON.stringify(payload)).toString("base64url"), "sig"].join(".");
+}

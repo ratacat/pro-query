@@ -10,6 +10,7 @@ const BOOLEAN_FLAGS = new Set([
   "no-json",
   "dry-run",
   "include-expired",
+  "no-start",
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {

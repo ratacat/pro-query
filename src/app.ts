@@ -1,4 +1,8 @@
+import { mkdirSync } from "node:fs";
+import { openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { flagBoolean, flagString, parseArgs } from "./args";
 import { captureAuth, defaultCdpBase, getAuthStatus } from "./auth";
 import { loadConfig, resolvePaths, saveConfig } from "./config";
@@ -10,7 +14,7 @@ import { writeError, writeSuccess } from "./output";
 import { runChatGptJob } from "./transport";
 
 const HELP_TEXT =
-  "pro: ChatGPT Pro CLI\nauth capture|status, models, submit, status, result, wait, cancel, jobs, doctor\nUse --json for agents.";
+  "pro: ChatGPT Pro CLI\nauth capture|status, models, submit, run, status, wait, result, cancel, jobs, doctor\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -69,9 +73,39 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
             prompt,
             model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
             reasoning: flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto",
-            options: collectSubmitOptions(parsed.flags),
+            options: await collectSubmitOptions(parsed.flags, io.cwd),
           });
-          writeSuccess(io, mode, { job });
+          const workerStarted = !flagBoolean(parsed.flags, "no-start");
+          if (workerStarted) startBackgroundWorker(job.id, io, paths.home);
+          writeSuccess(io, mode, { job, worker: { started: workerStarted } });
+          return EXIT.success;
+        } finally {
+          store.close();
+        }
+      }
+      case "run": {
+        const prompt = await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd);
+        const store = await JobStore.open(paths.dbPath);
+        try {
+          const created = store.create({
+            prompt,
+            model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
+            reasoning: flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto",
+            options: await collectSubmitOptions(parsed.flags, io.cwd),
+          });
+          const executed = await executeQueuedJob(store, created.id, paths.sessionTokenPath);
+          writeSuccess(io, mode, executed);
+          return EXIT.success;
+        } finally {
+          store.close();
+        }
+      }
+      case "worker": {
+        const jobId = subcommand;
+        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro worker <job-id>."]);
+        const store = await JobStore.open(paths.dbPath);
+        try {
+          writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths.sessionTokenPath));
           return EXIT.success;
         } finally {
           store.close();
@@ -109,23 +143,17 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       case "wait": {
         const jobId = subcommand;
         if (!jobId) throw invalidArgs("Missing job id.", ["Use pro wait <job-id>."]);
+        const waitTimeoutMs = parseIntegerFlag(parsed.flags, "wait-timeout", 0, 0, 24 * 60 * 60_000);
+        const pollMs = parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000);
         const store = await JobStore.open(paths.dbPath);
         try {
           const job = store.get(jobId);
           if (job.status === "queued") {
-            store.markRunning(jobId);
-            try {
-              const result = await runChatGptJob(store.get(jobId), {
-                sessionTokenPath: paths.sessionTokenPath,
-              });
-              writeSuccess(io, mode, { job: redactJob(store.markSucceeded(jobId, result)) });
-            } catch (error) {
-              const proError = toProError(error);
-              writeSuccess(io, mode, {
-                job: redactJob(store.markFailed(jobId, proError)),
-                error: proError.toPayload(),
-              });
-            }
+            writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths.sessionTokenPath));
+            return EXIT.success;
+          }
+          if (job.status === "running") {
+            writeSuccess(io, mode, { job: redactJob(await waitForTerminalJob(store, jobId, waitTimeoutMs, pollMs)) });
             return EXIT.success;
           }
           writeSuccess(io, mode, { job: redactJob(job) });
@@ -208,6 +236,7 @@ function commandList(): string[] {
     "auth capture",
     "models",
     "submit",
+    "run",
     "status",
     "result",
     "wait",
@@ -227,13 +256,216 @@ async function promptFromArgs(args: string[], cwd: string): Promise<string> {
   return prompt;
 }
 
-function collectSubmitOptions(flags: Map<string, string | boolean | string[]>): Record<string, unknown> {
+async function collectSubmitOptions(
+  flags: Map<string, string | boolean | string[]>,
+  cwd: string,
+): Promise<Record<string, unknown>> {
+  rejectUnsupportedFlags(flags, SUBMIT_FLAGS, "submit/run");
   const options: Record<string, unknown> = {};
-  for (const key of ["temperature", "timeout", "conversation", "reasoning", "model"]) {
-    const value = flagString(flags, key);
-    if (value !== undefined) options[key] = value;
+  setStringOption(options, "verbosity", flags, "verbosity", ["low", "medium", "high"]);
+  setStringOption(options, "reasoningSummary", flags, "reasoning-summary", [
+    "auto",
+    "concise",
+    "detailed",
+    "none",
+  ]);
+  setStringOption(options, "toolChoice", flags, "tool-choice", ["auto", "none", "required"]);
+  setIntegerOption(options, "timeoutMs", flags, "timeout", 1, 30 * 60_000);
+  setIntegerOption(options, "retries", flags, "retries", 0, 5);
+  setIntegerOption(options, "retryDelayMs", flags, "retry-delay", 0, 60_000);
+  setBooleanOption(options, "parallelTools", flags, "parallel-tools");
+  setBooleanOption(options, "store", flags, "store");
+
+  const instructions = flagString(flags, "instructions");
+  const instructionsFile = flagString(flags, "instructions-file");
+  if (instructions && instructionsFile) {
+    throw invalidArgs("Use only one instructions source.", ["Pass --instructions or --instructions-file, not both."]);
+  }
+  if (instructions) {
+    options.instructions = await readMaybeAtFile(instructions, cwd);
+  }
+  if (instructionsFile) {
+    options.instructions = await readFile(new URL(instructionsFile, `file://${cwd}/`), "utf8");
   }
   return options;
+}
+
+const SUBMIT_FLAGS = new Set([
+  "json",
+  "no-json",
+  "model",
+  "reasoning",
+  "verbosity",
+  "reasoning-summary",
+  "tool-choice",
+  "parallel-tools",
+  "instructions",
+  "instructions-file",
+  "timeout",
+  "retries",
+  "retry-delay",
+  "store",
+  "no-start",
+]);
+
+function rejectUnsupportedFlags(
+  flags: Map<string, string | boolean | string[]>,
+  allowed: Set<string>,
+  command: string,
+): void {
+  for (const key of flags.keys()) {
+    if (!allowed.has(key)) {
+      throw invalidArgs(`Unsupported --${key} for ${command}.`, [
+        "Run pro help or pro models --json for supported request controls.",
+      ]);
+    }
+  }
+}
+
+async function executeQueuedJob(
+  store: JobStore,
+  jobId: string,
+  sessionTokenPath: string,
+): Promise<Record<string, unknown>> {
+  const claimed = store.claimQueued(jobId);
+  if (!claimed) return { job: redactJob(store.get(jobId)) };
+  try {
+    const result = await runChatGptJob(claimed, {
+      sessionTokenPath,
+      timeoutMs: numberFromOption(claimed.options.timeoutMs),
+      retries: numberFromOption(claimed.options.retries),
+      retryDelayMs: numberFromOption(claimed.options.retryDelayMs),
+    });
+    const completed = store.markSucceeded(jobId, result);
+    return { job: redactJob(completed), result };
+  } catch (error) {
+    const proError = toProError(error);
+    return {
+      job: redactJob(store.markFailed(jobId, proError)),
+      error: proError.toPayload(),
+    };
+  }
+}
+
+function startBackgroundWorker(jobId: string, io: CliIO, home: string): void {
+  const cliPath = new URL("./cli.ts", import.meta.url).pathname;
+  const logDir = join(home, "workers");
+  mkdirSync(logDir, { recursive: true, mode: 0o700 });
+  const logPath = join(logDir, `${jobId}.log`);
+  const env = { ...process.env };
+  for (const [key, value] of Object.entries(io.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  const logFd = openSync(logPath, "a", 0o600);
+  const child = spawn(process.execPath, [cliPath, "worker", jobId, "--json"], {
+    cwd: io.cwd,
+    detached: true,
+    env,
+    stdio: ["ignore", logFd, logFd],
+  });
+  child.unref();
+}
+
+async function waitForTerminalJob(
+  store: JobStore,
+  jobId: string,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<ReturnType<JobStore["get"]>> {
+  const start = Date.now();
+  while (true) {
+    const job = store.get(jobId);
+    if (job.status !== "running") return job;
+    if (timeoutMs > 0 && Date.now() - start >= timeoutMs) {
+      throw new ProError("WAIT_TIMEOUT", `Job ${jobId} is still running.`, {
+        exitCode: EXIT.timeout,
+        suggestions: ["Run pro status <job-id> later.", "Use pro cancel <job-id> if this job is stale."],
+      });
+    }
+    await sleep(pollMs);
+  }
+}
+
+async function readMaybeAtFile(value: string, cwd: string): Promise<string> {
+  if (value.startsWith("@") && !value.includes(" ")) {
+    return readFile(new URL(value.slice(1), `file://${cwd}/`), "utf8");
+  }
+  return value;
+}
+
+function setStringOption(
+  options: Record<string, unknown>,
+  target: string,
+  flags: Map<string, string | boolean | string[]>,
+  source: string,
+  allowed?: string[],
+): void {
+  const value = flagString(flags, source);
+  if (value === undefined) return;
+  if (allowed && !allowed.includes(value)) {
+    throw invalidArgs(`Invalid --${source}.`, [`Allowed values: ${allowed.join(", ")}.`]);
+  }
+  options[target] = value;
+}
+
+function setIntegerOption(
+  options: Record<string, unknown>,
+  target: string,
+  flags: Map<string, string | boolean | string[]>,
+  source: string,
+  min: number,
+  max: number,
+): void {
+  const value = flagString(flags, source);
+  if (value === undefined) return;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < min || number > max) {
+    throw invalidArgs(`Invalid --${source}.`, [`Use an integer between ${min} and ${max}.`]);
+  }
+  options[target] = number;
+}
+
+function setBooleanOption(
+  options: Record<string, unknown>,
+  target: string,
+  flags: Map<string, string | boolean | string[]>,
+  source: string,
+): void {
+  const value = flagString(flags, source);
+  if (value === undefined) return;
+  if (["true", "1", "yes", "on"].includes(value.toLowerCase())) {
+    options[target] = true;
+    return;
+  }
+  if (["false", "0", "no", "off"].includes(value.toLowerCase())) {
+    options[target] = false;
+    return;
+  }
+  throw invalidArgs(`Invalid --${source}.`, ["Use true or false."]);
+}
+
+function parseIntegerFlag(
+  flags: Map<string, string | boolean | string[]>,
+  source: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const value = flagString(flags, source);
+  if (value === undefined) return fallback;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < min || number > max) {
+    throw invalidArgs(`Invalid --${source}.`, [`Use an integer between ${min} and ${max}.`]);
+  }
+  return number;
+}
+
+function numberFromOption(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function redactPaths(paths: { home: string; configPath: string; dbPath: string }): {

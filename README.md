@@ -39,13 +39,37 @@ through `.env.local`.
 ## Submit Jobs
 
 ```sh
-pro submit "Reply with OK only." --model gpt-5.4 --reasoning low --json
+pro submit "Reply with OK only." --model gpt-5.5 --reasoning low --json
 pro wait <job-id> --json
 pro result <job-id> --json
 ```
 
-`jobs` and `status` return compact previews. Use `result` to retrieve the full
-model output.
+`submit` returns immediately and starts a background worker by default. Pass
+`--no-start` to only create a queued job. `jobs` and `status` return compact
+previews. Use `result` to retrieve the full model output. Worker logs are kept
+under `~/.pro/workers/`.
+
+For one-shot agent calls, use `run`:
+
+```sh
+pro run "Reply with OK only." --reasoning low --verbosity low --json
+```
+
+Useful request controls:
+
+```sh
+--model auto|gpt-5.5|...
+--reasoning auto|low|medium|high
+--verbosity low|medium|high
+--instructions "system text"
+--instructions-file prompt-system.txt
+--reasoning-summary auto|concise|detailed|none
+--tool-choice auto|none|required
+--parallel-tools true|false
+--timeout <ms>
+--retries <0..5>
+--retry-delay <ms>
+```
 
 ## Commands
 
@@ -53,6 +77,7 @@ model output.
 pro auth status|capture
 pro models
 pro submit "prompt"
+pro run "prompt"
 pro status <job-id>
 pro wait <job-id>
 pro result <job-id>
@@ -60,6 +85,11 @@ pro cancel <job-id>
 pro jobs
 pro doctor
 ```
+
+## Dependencies
+
+Runtime stays dependency-free beyond Bun itself. The repo uses TypeScript and
+`@types/bun` for development checks.
 
 ## Safety
 

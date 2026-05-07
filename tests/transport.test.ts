@@ -62,6 +62,37 @@ describe("ChatGPT transport", () => {
       expect(accountHeader).toBe("acct_test");
       expect(requestBody?.model).toBe("gpt-5.5");
       expect(requestBody?.stream).toBe(true);
+      expect(requestBody?.instructions).toBe("Use terse answers.");
+      expect(requestBody?.text).toEqual({ verbosity: "high" });
+      expect(requestBody?.tool_choice).toBe("none");
+      expect(requestBody?.parallel_tool_calls).toBe(false);
+      expect(requestBody?.reasoning).toEqual({ effort: "low", summary: "detailed" });
+    });
+  });
+
+  test("retries transient upstream failures", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      let attempts = 0;
+      globalThis.fetch = (async () => {
+        attempts += 1;
+        if (attempts === 1) return new Response("busy", { status: 503 });
+        return new Response(
+          [
+            'event: response.completed\ndata: {"type":"response.completed","response":{"output":[{"content":[{"text":"OK"}]}]}}',
+            "",
+          ].join("\n\n"),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }) as unknown as typeof fetch;
+
+      const result = await runChatGptJob(job(), {
+        sessionTokenPath,
+        retries: 1,
+        retryDelayMs: 0,
+      });
+
+      expect(result).toBe("OK");
+      expect(attempts).toBe(2);
     });
   });
 
@@ -86,7 +117,13 @@ function job(): JobRecord {
     prompt: "Reply with OK only.",
     model: "auto",
     reasoning: "low",
-    options: {},
+    options: {
+      instructions: "Use terse answers.",
+      verbosity: "high",
+      reasoningSummary: "detailed",
+      toolChoice: "none",
+      parallelTools: false,
+    },
     result: null,
     error: null,
     createdAt: now,

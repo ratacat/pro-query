@@ -137,6 +137,14 @@ export class JobStore {
     return this.get(id);
   }
 
+  claimQueued(id: string): JobRecord | null {
+    const now = new Date().toISOString();
+    const result = this.db
+      .query("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+      .run("running", now, id, "queued") as { changes?: number };
+    return result.changes && result.changes > 0 ? this.get(id) : null;
+  }
+
   markSucceeded(id: string, result: string): JobRecord {
     this.update(id, { status: "succeeded", result, error: null });
     return this.get(id);
