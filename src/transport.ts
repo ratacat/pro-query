@@ -23,19 +23,19 @@ export async function runChatGptJob(job: JobRecord, options: TransportOptions): 
   if (!session) {
     throw new ProError("SESSION_TOKEN_MISSING", "No ChatGPT session token is available.", {
       exitCode: EXIT.auth,
-      suggestions: ["Run pro auth capture from a logged-in ChatGPT CDP browser."],
+      suggestions: ["Run pro-cli auth capture from a logged-in ChatGPT CDP browser."],
     });
   }
   if (!isTokenFresh(session)) {
     throw new ProError("SESSION_TOKEN_EXPIRED", "The ChatGPT session token is expired.", {
       exitCode: EXIT.auth,
-      suggestions: ["Run pro auth capture again from a logged-in ChatGPT browser."],
+      suggestions: ["Run pro-cli auth capture again from a logged-in ChatGPT browser."],
     });
   }
   if (!session.accountId) {
     throw new ProError("ACCOUNT_ID_MISSING", "The ChatGPT account id is missing from the token.", {
       exitCode: EXIT.auth,
-      suggestions: ["Run pro auth capture again and confirm ChatGPT is logged in."],
+      suggestions: ["Run pro-cli auth capture again and confirm ChatGPT is logged in."],
     });
   }
 
@@ -76,7 +76,7 @@ async function postChatGptJob(
       throw new ProError("CHATGPT_PAGE_MISSING", "No logged-in ChatGPT page is available over CDP.", {
         exitCode: EXIT.auth,
         suggestions: [
-          "Open the Chrome command from pro auth command.",
+          "Open the Chrome command from pro-cli auth command.",
           "Confirm the CDP Chrome window is on https://chatgpt.com/ and logged in.",
           "Pass --cdp if Chrome is using a non-default CDP port.",
         ],
@@ -88,9 +88,9 @@ async function postChatGptJob(
       throw new ProError("CHATGPT_PAGE_LOGGED_OUT", "The ChatGPT CDP page is not logged in.", {
         exitCode: EXIT.auth,
         suggestions: [
-          "Sign in to ChatGPT in the Chrome window from pro auth command.",
-          "Run pro auth capture --cdp http://127.0.0.1:9222 --json after login.",
-          "Retry pro run with the same --cdp value.",
+          "Sign in to ChatGPT in the Chrome window from pro-cli auth command.",
+          "Run pro-cli auth capture --cdp http://127.0.0.1:9222 --json after login.",
+          "Retry pro-cli run with the same --cdp value.",
         ],
         details: { status: browserResult.status },
       });
@@ -99,7 +99,7 @@ async function postChatGptJob(
     if (!browserResult.ok) {
       throw new ProError("UPSTREAM_REJECTED", `ChatGPT backend returned HTTP ${browserResult.status}.`, {
         exitCode: EXIT.upstream,
-        suggestions: ["Run pro auth capture again.", "Check whether the ChatGPT Pro usage limit is reached."],
+        suggestions: ["Run pro-cli auth capture again.", "Check whether the ChatGPT Pro usage limit is reached."],
         details: {
           status: browserResult.status,
           preview: browserResult.body.slice(0, 160).replace(/\s+/g, " "),
@@ -1035,7 +1035,7 @@ function booleanOption(value: unknown, fallback: boolean): boolean {
 function networkError(error: unknown): ProError {
   return new ProError("NETWORK_ERROR", "ChatGPT backend request failed before a response.", {
     exitCode: EXIT.network,
-    suggestions: ["Check connectivity and retry.", "Run pro auth status --json if this persists."],
+    suggestions: ["Check connectivity and retry.", "Run pro-cli auth status --json if this persists."],
     cause: error,
   });
 }

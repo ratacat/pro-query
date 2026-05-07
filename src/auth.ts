@@ -114,7 +114,7 @@ export async function getBrowserSessionStatus(
         httpStatus: result.status,
         pageOrigin: result.origin,
         suggestions: [
-          "Open the Chrome command from pro auth command.",
+          "Open the Chrome command from pro-cli auth command.",
           "Confirm the CDP tab is on https://chatgpt.com/.",
         ],
         rawValuesPrinted: false,
@@ -139,7 +139,7 @@ export async function getBrowserSessionStatus(
       pageOrigin: result?.origin,
       suggestions: [
         "Sign in to ChatGPT in the CDP Chrome window.",
-        `Run pro auth capture --cdp ${cdpBase} --json after login.`,
+        `Run pro-cli auth capture --cdp ${cdpBase} --json after login.`,
       ],
       rawValuesPrinted: false,
     };
@@ -196,7 +196,7 @@ export async function captureAuth(options: CaptureOptions): Promise<AuthStatus> 
       suggestions: [
         "Open https://chatgpt.com/ in the CDP Chrome window.",
         "Confirm the logged-in ChatGPT UI is visible.",
-        "Retry pro auth capture.",
+        "Retry pro-cli auth capture.",
       ],
     });
   }
@@ -247,7 +247,7 @@ async function getSessionAccessTokenFromPage(cdpBase: string, timeoutMs: number)
       exitCode: EXIT.auth,
       suggestions: [
         "Confirm the CDP tab is on https://chatgpt.com/ and logged in.",
-        "Refresh the ChatGPT page and retry pro auth capture.",
+        "Refresh the ChatGPT page and retry pro-cli auth capture.",
       ],
       details: { status: result.status },
     });

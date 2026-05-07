@@ -15,7 +15,7 @@ async function withTokenFile<T>(fn: (path: string) => Promise<T>): Promise<T> {
       JSON.stringify({
         version: 1,
         generatedAt: new Date().toISOString(),
-        source: "pro-cdp-page",
+        source: "pro-cli-cdp-page",
         accessToken: fakeJwt(),
         accountId: "acct_test",
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),

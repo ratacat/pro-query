@@ -97,11 +97,11 @@ cd "$INSTALL_DIR"
 log "installing dependencies"
 bun install
 
-log "linking pro"
+log "linking pro-cli"
 bun link
 
-if ! command -v pro >/dev/null 2>&1; then
-  die "bun link completed, but pro is not on PATH"
+if ! command -v pro-cli >/dev/null 2>&1; then
+  die "bun link completed, but pro-cli is not on PATH"
 fi
 
-log "installed $(pro --version)"
+log "installed $(pro-cli --version)"

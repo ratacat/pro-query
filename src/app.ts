@@ -17,7 +17,7 @@ import { runChatGptJob } from "./transport";
 const REASONING_LEVELS = ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
 
 const HELP_TEXT =
-  "pro: ChatGPT Pro CLI\nsetup, auth command, auth capture, auth status, models, run, submit, wait, result, jobs, doctor\nUse --json for agents.";
+  "pro-cli: ChatGPT Pro CLI\nsetup, auth command, auth capture, auth status, models, run, submit, wait, result, jobs, doctor\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -28,7 +28,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
   try {
     const [command, subcommand, ...rest] = parsed.positionals;
     if (flagBoolean(parsed.flags, "version") || command === "version") {
-      io.stdout(`pro ${packageJson.version}\n`);
+      io.stdout(`pro-cli ${packageJson.version}\n`);
       return EXIT.success;
     }
 
@@ -82,7 +82,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           writeSuccess(io, mode, status);
           return EXIT.success;
         }
-        throw invalidArgs("Unknown auth command.", ["Use pro auth status or pro auth capture."]);
+        throw invalidArgs("Unknown auth command.", ["Use pro-cli auth status or pro-cli auth capture."]);
       }
       case "models": {
         writeSuccess(io, mode, await listModels({ sessionTokenPath: paths.sessionTokenPath }));
@@ -125,7 +125,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "worker": {
         const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro worker <job-id>."]);
+        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli worker <job-id>."]);
         const store = await JobStore.open(paths.dbPath);
         try {
           writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths));
@@ -136,7 +136,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "status": {
         const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro status <job-id>."]);
+        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli status <job-id>."]);
         const store = await JobStore.open(paths.dbPath);
         try {
           writeSuccess(io, mode, { job: redactJob(store.get(jobId)) });
@@ -147,14 +147,14 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "result": {
         const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro result <job-id>."]);
+        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli result <job-id>."]);
         const store = await JobStore.open(paths.dbPath);
         try {
           const job = store.get(jobId);
           if (job.status !== "succeeded") {
             throw new ProError("JOB_NOT_READY", `Job ${jobId} is ${job.status}.`, {
               exitCode: EXIT.notFound,
-              suggestions: ["Run pro wait <job-id> or pro status <job-id>."],
+              suggestions: ["Run pro-cli wait <job-id> or pro-cli status <job-id>."],
             });
           }
           writeSuccess(io, mode, { jobId, result: job.result });
@@ -165,7 +165,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "wait": {
         const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro wait <job-id>."]);
+        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli wait <job-id>."]);
         const waitTimeoutMs = parseIntegerFlag(parsed.flags, "wait-timeout", 0, 0, 24 * 60 * 60_000);
         const pollMs = parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000);
         const store = await JobStore.open(paths.dbPath);
@@ -187,7 +187,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "cancel": {
         const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro cancel <job-id>."]);
+        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli cancel <job-id>."]);
         const store = await JobStore.open(paths.dbPath);
         try {
           writeSuccess(io, mode, { job: store.cancel(jobId) });
@@ -216,7 +216,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         }
         if (subcommand === "set") {
           const [key, value] = rest;
-          if (!key || !value) throw invalidArgs("Missing config key/value.", ["Use pro config set model auto."]);
+          if (!key || !value) throw invalidArgs("Missing config key/value.", ["Use pro-cli config set model auto."]);
           const next = { ...config };
           if (key === "model") next.defaultModel = value;
           else if (key === "reasoning") next.defaultReasoning = resolveReasoning(value);
@@ -225,7 +225,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           writeSuccess(io, mode, { config: next });
           return EXIT.success;
         }
-        throw invalidArgs("Unknown config command.", ["Use pro config get or pro config set."]);
+        throw invalidArgs("Unknown config command.", ["Use pro-cli config get or pro-cli config set."]);
       }
       case "doctor": {
         const auth = await getAuthStatus(paths);
@@ -251,7 +251,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         return EXIT.success;
       }
       default:
-        throw invalidArgs(`Unknown command ${command}.`, ["Run pro help."]);
+        throw invalidArgs(`Unknown command ${command}.`, ["Run pro-cli help."]);
     }
   } catch (error) {
     const proError = toProError(error);
@@ -290,24 +290,24 @@ function buildDoctorNext(
 ): Record<string, string> {
   if (authReady && browserStatus === "present") {
     return {
-      command: `pro run "Reply with OK only." --cdp ${cdpBase} --json`,
+      command: `pro-cli run "Reply with OK only." --cdp ${cdpBase} --json`,
       reason: "Stored auth and the live CDP ChatGPT page are ready; run a smoke query.",
     };
   }
   if (authReady && browserStatus === "logged_out") {
     return {
-      command: `pro auth capture --cdp ${cdpBase} --json`,
+      command: `pro-cli auth capture --cdp ${cdpBase} --json`,
       reason: "The CDP ChatGPT page is reachable but logged out; sign in there, then recapture auth.",
     };
   }
   if (authReady && (browserStatus === "page_missing" || browserStatus === "cdp_unavailable")) {
     return {
-      command: "pro auth command --json",
+      command: "pro-cli auth command --json",
       reason: "Stored auth exists, but no live ChatGPT CDP page is available.",
     };
   }
   return {
-    command: "pro setup --json",
+    command: "pro-cli setup --json",
     reason: "Auth is missing or expired; follow the setup steps.",
   };
 }
@@ -317,19 +317,19 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
   const authCommand = buildAuthCommand(home, port);
   return {
     ready,
-    summary: ready ? "pro is ready to query ChatGPT." : "pro needs a logged-in ChatGPT browser session.",
+    summary: ready ? "pro-cli is ready to query ChatGPT." : "pro-cli needs a logged-in ChatGPT browser session.",
     steps: [
       {
         id: "install",
         status: "done",
         command: "curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh | bash",
-        note: "Clones or updates ~/Projects/pro-cli and links the pro binary.",
+        note: "Clones or updates ~/Projects/pro-cli and links the pro-cli binary.",
       },
       {
         id: "open-chatgpt",
         status: ready ? "done" : "todo",
         command: authCommand.command,
-        note: "Starts the dedicated ~/.pro Chrome profile with CDP enabled; keep this window open while pro jobs run.",
+        note: "Starts the dedicated ~/.pro Chrome profile with CDP enabled; keep this window open while pro-cli jobs run.",
       },
       {
         id: "capture-auth",
@@ -340,7 +340,7 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
       {
         id: "smoke-test",
         status: ready ? "todo" : "blocked",
-        command: `pro run "Reply with OK only." --cdp ${authCommand.cdp} --reasoning low --json`,
+        command: `pro-cli run "Reply with OK only." --cdp ${authCommand.cdp} --reasoning low --json`,
         note: "Verifies the live ChatGPT tab, captured auth, CDP port, and backend request path.",
       },
     ],
@@ -366,11 +366,11 @@ function buildAuthCommand(home: string, port: string): Record<string, unknown> {
         : `google-chrome --user-data-dir=${shellQuote(profileDir)} --remote-debugging-port=${port} ${url}`;
   return {
     command,
-    captureCommand: `pro auth capture --cdp ${cdp} --json`,
+    captureCommand: `pro-cli auth capture --cdp ${cdp} --json`,
     cdp,
     profileDir,
     port,
-    safety: "Recommended profile is dedicated to pro; keep it open for jobs and do not expose a normal browser profile over CDP.",
+    safety: "Recommended profile is dedicated to pro-cli; keep it open for jobs and do not expose a normal browser profile over CDP.",
   };
 }
 
@@ -386,7 +386,7 @@ function safetySummary(): Record<string, unknown> {
 
 async function promptFromArgs(args: string[], cwd: string): Promise<string> {
   const prompt = args.join(" ").trim();
-  if (!prompt) throw invalidArgs("Missing prompt.", ["Use pro submit \"prompt\" or pro submit @prompt.md."]);
+  if (!prompt) throw invalidArgs("Missing prompt.", ["Use pro-cli submit \"prompt\" or pro-cli submit @prompt.md."]);
   if (prompt.startsWith("@") && !prompt.includes(" ")) {
     return readFile(new URL(prompt.slice(1), `file://${cwd}/`), "utf8");
   }
@@ -496,7 +496,7 @@ function rejectUnsupportedFlags(
   for (const key of flags.keys()) {
     if (!allowed.has(key)) {
       throw invalidArgs(`Unsupported --${key} for ${command}.`, [
-        "Run pro help or pro models --json for supported request controls.",
+        "Run pro-cli help or pro-cli models --json for supported request controls.",
       ]);
     }
   }
@@ -560,7 +560,7 @@ async function waitForTerminalJob(
     if (timeoutMs > 0 && Date.now() - start >= timeoutMs) {
       throw new ProError("WAIT_TIMEOUT", `Job ${jobId} is still running.`, {
         exitCode: EXIT.timeout,
-        suggestions: ["Run pro status <job-id> later.", "Use pro cancel <job-id> if this job is stale."],
+        suggestions: ["Run pro-cli status <job-id> later.", "Use pro-cli cancel <job-id> if this job is stale."],
       });
     }
     await sleep(pollMs);

@@ -22,7 +22,7 @@
     "automation"
   ],
   "bin": {
-    "pro": "./src/cli.ts"
+    "pro-cli": "./src/cli.ts"
   },
   "scripts": {
     "test": "bun test",

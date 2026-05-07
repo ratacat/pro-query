@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 export interface SessionTokenExport {
   version: 1;
   generatedAt: string;
-  source: "pro-cdp-page";
+  source: "pro-cli-cdp-page";
   accessToken: string;
   accountId?: string;
   expiresAt?: string;
@@ -14,7 +14,7 @@ export function toSessionTokenExport(accessToken: string): SessionTokenExport {
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
-    source: "pro-cdp-page",
+    source: "pro-cli-cdp-page",
     accessToken,
     ...(accountIdFromToken(accessToken) ? { accountId: accountIdFromToken(accessToken) } : {}),
     ...(expiresMs ? { expiresAt: new Date(expiresMs).toISOString() } : {}),

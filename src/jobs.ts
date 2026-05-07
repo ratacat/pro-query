@@ -104,7 +104,7 @@ export class JobStore {
     if (!row) {
       throw new ProError("JOB_NOT_FOUND", `No job exists for ${id}.`, {
         exitCode: EXIT.notFound,
-        suggestions: ["Run pro jobs --json to list recent jobs."],
+        suggestions: ["Run pro-cli jobs --json to list recent jobs."],
       });
     }
     return rowToJob(row);

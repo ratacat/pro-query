@@ -57,13 +57,13 @@ export function renderText(payload: unknown): string {
     const status = payload.ready ? "ready" : "not ready";
     const command =
       typeof payload.next.command === "string" ? `\nnext: ${payload.next.command}` : "";
-    return `pro ${status}${command}`;
+    return `pro-cli ${status}${command}`;
   }
   if ("job" in payload && isRecord(payload.job)) {
     const id = typeof payload.job.id === "string" ? payload.job.id : "unknown";
     const status = typeof payload.job.status === "string" ? payload.job.status : "unknown";
     const resultHint =
-      status === "succeeded" ? `\nresult: pro result ${id}` : `\nwait: pro wait ${id}`;
+      status === "succeeded" ? `\nresult: pro-cli result ${id}` : `\nwait: pro-cli wait ${id}`;
     return `job ${id} ${status}${resultHint}`;
   }
   return JSON.stringify(payload);

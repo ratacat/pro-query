@@ -81,7 +81,7 @@ async function resolveRequiredPageWebSocketUrl(cdpBase: string): Promise<string>
   throw new ProError("CHATGPT_PAGE_MISSING", `No inspectable page is available over CDP at ${base}.`, {
     exitCode: EXIT.auth,
     suggestions: [
-      "Open the Chrome command from pro auth command.",
+      "Open the Chrome command from pro-cli auth command.",
       "Confirm the CDP Chrome window has a https://chatgpt.com/ tab.",
     ],
     details: { cdpBase: base },

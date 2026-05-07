@@ -49,7 +49,7 @@ describe("robot-mode CLI", () => {
     const result = await run([], { tty: true });
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("pro: ChatGPT Pro CLI");
+    expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
     expect(result.stdout.length).toBeLessThan(160);
     expect(result.stderr).toBe("");
   });
@@ -58,7 +58,7 @@ describe("robot-mode CLI", () => {
     const result = await run(["--help"], { tty: true });
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("pro: ChatGPT Pro CLI");
+    expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
     expect(result.stdout.length).toBeLessThan(160);
     expect(result.stderr).toBe("");
   });
@@ -76,7 +76,7 @@ describe("robot-mode CLI", () => {
     const result = await run(["--version"], { tty: false });
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toMatch(/^pro \d+\.\d+\.\d+\n$/);
+    expect(result.stdout).toMatch(/^pro-cli \d+\.\d+\.\d+\n$/);
     expect(result.stderr).toBe("");
   });
 
@@ -88,7 +88,7 @@ describe("robot-mode CLI", () => {
     const payload = JSON.parse(result.stderr);
     expect(payload.ok).toBe(false);
     expect(payload.error.code).toBe("INVALID_ARGS");
-    expect(payload.error.suggestions).toContain("Run pro help.");
+    expect(payload.error.suggestions).toContain("Run pro-cli help.");
   });
 
   test("setup gives a safe first-run path without secrets", async () => {
@@ -106,7 +106,7 @@ describe("robot-mode CLI", () => {
         "smoke-test",
       ]);
       expect(payload.data.steps[1].command).toContain("chrome-profile");
-      expect(payload.data.steps[2].command).toContain("pro auth capture");
+      expect(payload.data.steps[2].command).toContain("pro-cli auth capture");
       expect(payload.data.safety.rawValuesPrinted).toBe(false);
     });
   });
@@ -116,9 +116,9 @@ describe("robot-mode CLI", () => {
       const result = await run(["setup"], { tty: true, home });
 
       expect(result.code).toBe(0);
-      expect(result.stdout).toContain("pro needs a logged-in ChatGPT browser session");
+      expect(result.stdout).toContain("pro-cli needs a logged-in ChatGPT browser session");
       expect(result.stdout).toContain("[todo] open-chatgpt");
-      expect(result.stdout).toContain("pro auth capture");
+      expect(result.stdout).toContain("pro-cli auth capture");
       expect(result.stdout).not.toContain("{\"ready\"");
     });
   });
@@ -134,7 +134,7 @@ describe("robot-mode CLI", () => {
       const payload = JSON.parse(result.stdout);
       expect(payload.data.command).toContain("chrome-profile");
       expect(payload.data.command).toContain("9333");
-      expect(payload.data.captureCommand).toBe("pro auth capture --cdp http://127.0.0.1:9333 --json");
+      expect(payload.data.captureCommand).toBe("pro-cli auth capture --cdp http://127.0.0.1:9333 --json");
       expect(payload.data.safety).toContain("dedicated");
     });
   });
@@ -160,7 +160,7 @@ describe("robot-mode CLI", () => {
         JSON.stringify({
           version: 1,
           generatedAt: new Date().toISOString(),
-          source: "pro-cdp",
+          source: "pro-cli-cdp",
           targetUrl: "https://chatgpt.com/",
           origins: ["https://chatgpt.com/"],
           cookies: [
@@ -230,7 +230,7 @@ describe("robot-mode CLI", () => {
         JSON.stringify({
           version: 1,
           generatedAt: new Date().toISOString(),
-          source: "pro-cdp-page",
+          source: "pro-cli-cdp-page",
           accessToken: fakeJwt(),
           accountId: "acct_test",
           expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
@@ -331,7 +331,7 @@ describe("robot-mode CLI", () => {
         JSON.stringify({
           version: 1,
           generatedAt: new Date().toISOString(),
-          source: "pro-cdp-page",
+          source: "pro-cli-cdp-page",
           accessToken: fakeJwt(),
           accountId: "acct_test",
           expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
@@ -377,7 +377,7 @@ describe("robot-mode CLI", () => {
       expect(payload.data.browserSession.status).toBe("logged_out");
       expect(payload.data.ready).toBe(false);
       expect(payload.data.transport.status).toBe("auth_required");
-      expect(payload.data.next.command).toContain("pro auth capture");
+      expect(payload.data.next.command).toContain("pro-cli auth capture");
     });
   });
 
@@ -414,7 +414,7 @@ async function writeSessionToken(home: string): Promise<void> {
     JSON.stringify({
       version: 1,
       generatedAt: new Date().toISOString(),
-      source: "pro-cdp-page",
+      source: "pro-cli-cdp-page",
       accessToken: fakeJwt(),
       accountId: "acct_test",
       expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
