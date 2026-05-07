@@ -127,6 +127,26 @@ describe("ChatGPT transport", () => {
     });
   });
 
+  test("accepts completed streams with final text in output_text.done", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      globalThis.fetch = (async () =>
+        new Response(
+          [
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"O"}',
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"K"}',
+            'event: response.output_text.done\ndata: {"type":"response.output_text.done","text":"OK"}',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}',
+            "",
+          ].join("\n\n"),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )) as unknown as typeof fetch;
+
+      const result = await runChatGptJob(job(), { sessionTokenPath });
+
+      expect(result).toBe("OK");
+    });
+  });
+
   test("maps non-OK upstream responses to structured errors", async () => {
     await withTokenFile(async (sessionTokenPath) => {
       globalThis.fetch = (async () =>

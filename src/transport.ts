@@ -153,10 +153,12 @@ async function readResponseStream(response: Response): Promise<string> {
         }
         const delta = readDelta(event);
         if (delta) output += delta;
-        const finalText = readCompletedText(event);
-        if (finalText !== null) {
+        const doneText = readOutputTextDone(event);
+        if (doneText !== null) completedText = doneText;
+        if (event.type === "response.completed") {
           completed = true;
-          completedText = finalText;
+          const finalText = readCompletedText(event);
+          if (finalText !== null) completedText = finalText;
         }
       }
       boundary = buffer.indexOf("\n\n");
@@ -202,6 +204,11 @@ function readCompletedText(event: Record<string, unknown>): string | null {
     }
   }
   return parts.length > 0 ? parts.join("") : null;
+}
+
+function readOutputTextDone(event: Record<string, unknown>): string | null {
+  if (event.type !== "response.output_text.done") return null;
+  return typeof event.text === "string" ? event.text : null;
 }
 
 function readErrorMessage(event: Record<string, unknown>): string {
