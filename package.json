@@ -1,5 +1,5 @@
 {
-  "name": "pro-query",
+  "name": "pro-cli",
   "version": "0.1.0",
   "description": "Local robot-friendly CLI for querying ChatGPT from a consented logged-in browser session.",
   "type": "module",

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pro-query",
+      "name": "pro-cli",
       "devDependencies": {
         "@types/bun": "^1.3.5",
         "typescript": "^5.9.3",

@@ -1,6 +1,6 @@
-# pro-query
+# pro-cli
 
-`pro` is a local CLI for querying ChatGPT from a paid, logged-in web account.
+`pro-cli` installs the `pro` command: a local CLI for querying ChatGPT from a paid, logged-in web account.
 It is built for developers and AI coding agents that need a scriptable terminal
 interface without copying prompts into the browser.
 
@@ -20,7 +20,7 @@ when auth expires, the web backend changes, or a stream is interrupted.
 
 ## Install
 
-Until the package name is finalized:
+From source:
 
 ```sh
 git clone https://github.com/ratacat/pro-query
