@@ -3,6 +3,7 @@ import { openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import packageJson from "../package.json" with { type: "json" };
 import { flagBoolean, flagString, parseArgs } from "./args";
 import { captureAuth, defaultCdpBase, getAuthStatus } from "./auth";
 import { loadConfig, resolvePaths, saveConfig } from "./config";
@@ -24,6 +25,11 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 
   try {
     const [command, subcommand, ...rest] = parsed.positionals;
+    if (flagBoolean(parsed.flags, "version") || command === "version") {
+      io.stdout(`pro ${packageJson.version}\n`);
+      return EXIT.success;
+    }
+
     if (!command || command === "help" || command === "--help") {
       writeSuccess(io, mode, { text: HELP_TEXT, commands: commandList() });
       return EXIT.success;
@@ -281,8 +287,8 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
       {
         id: "install",
         status: "done",
-        command: "bun install && bun link",
-        note: "Run from the cloned repo until a package name is finalized.",
+        command: "curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh | bash",
+        note: "Clones or updates ~/Projects/pro-cli and links the pro binary.",
       },
       {
         id: "open-chatgpt",

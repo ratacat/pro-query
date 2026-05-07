@@ -61,6 +61,14 @@ describe("robot-mode CLI", () => {
     expect(payload.data.text).toContain("auth capture");
   });
 
+  test("prints version for install verification", async () => {
+    const result = await run(["--version"], { tty: false });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/^pro \d+\.\d+\.\d+\n$/);
+    expect(result.stderr).toBe("");
+  });
+
   test("emits structured JSON errors and invalid-args exit code", async () => {
     const result = await run(["missing-command", "--json"], { tty: true });
 

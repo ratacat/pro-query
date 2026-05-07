@@ -10,7 +10,29 @@ It gives coding agents a scriptable path to the ChatGPT Pro surface you already 
 
 Requires Bun. `pro-cli` has been tested on macOS. Windows may work, but the install and Chrome auth commands may need adjustment.
 
-Run this from the directory where you want the `pro-cli` checkout to live:
+Quick install:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh | bash
+```
+
+To choose the checkout path:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh | PRO_INSTALL_DIR="$HOME/Projects/pro-cli" bash
+```
+
+To inspect before running:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh -o /tmp/pro-cli-install.sh
+less /tmp/pro-cli-install.sh
+bash /tmp/pro-cli-install.sh
+```
+
+The installer clones or fast-forwards `~/Projects/pro-cli`, runs `bun install`, runs `bun link`, and prints `pro --version`. It does not touch auth, cookies, Chrome, or `~/.pro`.
+
+Manual install:
 
 ```sh
 if [ -d pro-cli/.git ]; then git -C pro-cli pull --ff-only; else git clone https://github.com/ratacat/pro-cli.git; fi && cd pro-cli && bun install && bun link
