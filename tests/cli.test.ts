@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runCli } from "../src/app";
+import { JobStore } from "../src/jobs";
 
 const originalFetch = globalThis.fetch;
 const originalWebSocket = globalThis.WebSocket;
@@ -289,6 +290,14 @@ describe("robot-mode CLI", () => {
       expect(payload.data.job.prompt).toBe("");
       expect(payload.data.job.options.temporary).toBe(true);
       expect(payload.data.result).toBe("OK");
+      expect(payload.data.agentInstruction).toContain("data.result is the primary deliverable");
+      expect(payload.data.agentInstruction).toContain("preserve Pro's prose language");
+      expect(payload.data.resultStats).toMatchObject({
+        chars: 2,
+        approximateTokens: 1,
+        fullRelayThresholdChars: 6000,
+        fullRelayThresholdApproxTokens: 1500,
+      });
       await expect(access(join(home, "jobs.sqlite"))).rejects.toThrow();
       const requestBody = requestBodyFromExpression(expression);
       expect(requestBody.model).toBe("gpt-5-5-pro");
@@ -413,6 +422,34 @@ describe("robot-mode CLI", () => {
       const payload = JSON.parse(result.stderr);
       expect(payload.error.code).toBe("INVALID_ARGS");
       expect(payload.error.message).toContain("Choose one wait timeout mode");
+    });
+  });
+
+  test("job result includes relay guidance for agents", async () => {
+    await withHome(async (home) => {
+      const store = await JobStore.open(join(home, "jobs.sqlite"));
+      let jobId = "";
+      try {
+        const created = store.create({
+          prompt: "hello",
+          model: "gpt-5-5-pro",
+          reasoning: "standard",
+          options: {},
+        });
+        jobId = created.id;
+        store.markRunning(jobId);
+        store.markSucceeded(jobId, "Full Pro answer.");
+      } finally {
+        store.close();
+      }
+
+      const result = await run(["job", "result", jobId, "--json"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.result).toBe("Full Pro answer.");
+      expect(payload.data.agentInstruction).toContain("prefer relaying it in full");
+      expect(payload.data.resultStats.chars).toBe("Full Pro answer.".length);
     });
   });
 

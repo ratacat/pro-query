@@ -94,7 +94,7 @@ pro-cli doctor --json
 Put this in a user-level or project-level agent instructions file:
 
 ```md
-Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, Pro thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --wait --json` for a blocking durable query, or `pro-cli job create @prompt.md --json`, `pro-cli job wait <job-id> --json`, and `pro-cli job result <job-id> --json` when you need separate steps. `pro-cli` defaults to `gpt-5-5-pro` with `standard` reasoning; pass `--reasoning extended` only when the prompt needs deeper Pro reasoning. `job create` and `job wait` manage the local daemon. Do not add `--wait-timeout` unless you need a hard local command budget; a timeout means the job is still running, not failed. For a direct blocking query, use `pro-cli ask @prompt.md --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
+Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, Pro thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --wait --json` for a blocking durable query, or `pro-cli job create @prompt.md --json`, `pro-cli job wait <job-id> --json`, and `pro-cli job result <job-id> --json` when you need separate steps. `pro-cli` defaults to `gpt-5-5-pro` with `standard` reasoning; pass `--reasoning extended` only when the prompt needs deeper Pro reasoning. `job create` and `job wait` manage the local daemon. When JSON output includes `data.result`, follow `data.agentInstruction`: preserve Pro's answer as the primary deliverable, relaying short results in full and condensing long results only with care for Pro's prose, structure, and voice. Do not add `--wait-timeout` unless you need a hard local command budget; a timeout means the job is still running, not failed. For a direct blocking query, use `pro-cli ask @prompt.md --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
 ```
 
 ## Commands
@@ -151,6 +151,8 @@ pro-cli ask @prompt.md --reasoning extended --json
 ```
 
 `ask` executes without creating durable job state. Use `job create` when you need a job id that later `job wait`, `job result`, `job cancel`, or `job list` can inspect.
+
+JSON responses that include full Pro text also include `agentInstruction` and `resultStats`. Agents should treat `data.result` as the primary deliverable. Results under 6000 characters should usually be relayed in full; longer results may be condensed with care for the original prose, structure, and voice.
 
 ## Conversations
 
