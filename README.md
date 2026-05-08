@@ -94,7 +94,7 @@ pro-cli doctor --json
 Put this in a user-level or project-level agent instructions file:
 
 ```md
-Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --reasoning high --json`, then `pro-cli job wait <job-id> --json` and `pro-cli job result <job-id> --json`. `job create` and `job wait` manage the local daemon. For a direct blocking query, use `pro-cli ask @prompt.md --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
+Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, Pro thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --json`, then `pro-cli job wait <job-id> --json` and `pro-cli job result <job-id> --json`. `pro-cli` defaults to `gpt-5-5-pro` with `standard` reasoning; pass `--reasoning extended` only when the prompt needs deeper Pro reasoning. `job create` and `job wait` manage the local daemon. For a direct blocking query, use `pro-cli ask @prompt.md --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
 ```
 
 ## Commands
@@ -116,14 +116,15 @@ Models and defaults:
 ```sh
 pro-cli models --json
 pro-cli config get --json
-pro-cli config set model auto --json
-pro-cli config set reasoning high --json
+pro-cli config set model gpt-5-5-pro --json
+pro-cli config set reasoning extended --json
 ```
 
 Async jobs:
 
 ```sh
-pro-cli job create @prompt.md --model auto --reasoning high --json
+pro-cli job create @prompt.md --json
+pro-cli job create @prompt.md --reasoning extended --json
 pro-cli job wait <job-id> --wait-timeout 60000 --json
 pro-cli job result <job-id> --json
 pro-cli job cancel <job-id> --json
@@ -141,7 +142,8 @@ pro-cli daemon stop --json
 Direct ask:
 
 ```sh
-pro-cli ask @prompt.md --model auto --reasoning high --json
+pro-cli ask @prompt.md --json
+pro-cli ask @prompt.md --reasoning extended --json
 ```
 
 `ask` executes without creating durable job state. Use `job create` when you need a job id that later `job wait`, `job result`, `job cancel`, or `job list` can inspect.
@@ -158,24 +160,24 @@ pro-cli ask "follow up" --save --conversation <conversation-id> --parent <messag
 
 ## Thinking Modes
 
-By default, `pro-cli` sends `--model auto --reasoning auto`. That uses the model ChatGPT web selects for your logged-in account and sends no explicit `thinking_effort`.
+By default, `pro-cli` sends `--model gpt-5-5-pro --reasoning standard`. The request includes `thinking_effort=standard`, so it uses the Pro model rather than ChatGPT web's default picker.
 
-For most agent workflows:
+For deeper Pro reasoning:
 
 ```sh
---model auto --reasoning high
+--reasoning extended
 ```
 
-When `--model auto` is paired with a thinking mode, `pro-cli` selects the current Thinking model. Aliases map to the web app's effort values:
+Use exact web effort values:
 
 ```txt
-low=min
-medium=standard
-high=max
-extended=extended
+standard
+extended
+min
+max
 ```
 
-For explicit model ids, use an effort shown by:
+Pro models normally expose `standard` and `extended`. Thinking models may expose `min`, `standard`, `extended`, and `max`. For explicit model ids, use an effort shown by:
 
 ```sh
 pro-cli models --json
@@ -184,8 +186,8 @@ pro-cli models --json
 ## Request Controls
 
 ```sh
---model auto|<id from pro-cli models>
---reasoning auto|low|medium|high|extended|min|standard|max
+--model <id from pro-cli models>
+--reasoning min|standard|extended|max
 --cdp http://127.0.0.1:9222
 --port 9222
 --temporary

@@ -206,6 +206,8 @@ describe("robot-mode CLI", () => {
       const created = JSON.parse(createdResult.stdout);
       const jobId = created.data.job.id;
       expect(created.data.job.status).toBe("queued");
+      expect(created.data.job.model).toBe("gpt-5-5-pro");
+      expect(created.data.job.reasoning).toBe("standard");
       expect(created.data.daemon.started).toBe(false);
       expect(created.data.job.prompt).toBe("");
       expect(created.data.job.promptPreview).toBe("hello from agent");
@@ -266,7 +268,7 @@ describe("robot-mode CLI", () => {
           "hello",
           "--json",
           "--reasoning",
-          "high",
+          "extended",
           "--verbosity",
           "low",
           "--timeout",
@@ -287,10 +289,38 @@ describe("robot-mode CLI", () => {
       expect(payload.data.result).toBe("OK");
       await expect(access(join(home, "jobs.sqlite"))).rejects.toThrow();
       const requestBody = requestBodyFromExpression(expression);
-      expect(requestBody.model).toBe("gpt-5-5-thinking");
-      expect(requestBody.thinking_effort).toBe("max");
+      expect(requestBody.model).toBe("gpt-5-5-pro");
+      expect(requestBody.thinking_effort).toBe("extended");
       expect(requestBody.history_and_training_disabled).toBe(true);
       expect(requestBody).not.toHaveProperty("text");
+    });
+  });
+
+  test("defaults to Pro standard reasoning", async () => {
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      let expression = "";
+      installFakeCdp(conversationStream("OK"), (script) => {
+        expression = script;
+      });
+
+      const result = await run(["ask", "hello", "--json"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      const requestBody = requestBodyFromExpression(expression);
+      expect(requestBody.model).toBe("gpt-5-5-pro");
+      expect(requestBody.thinking_effort).toBe("standard");
+    });
+  });
+
+  test("rejects model auto", async () => {
+    await withHome(async (home) => {
+      const result = await run(["ask", "hello", "--model", "auto", "--json"], { tty: true, home });
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("Invalid --model");
     });
   });
 
@@ -322,7 +352,7 @@ describe("robot-mode CLI", () => {
       const requestBody = requestBodyFromExpression(expression);
       expect(requestBody.conversation_id).toBe("conv_123");
       expect(requestBody.parent_message_id).toBe("msg_456");
-      expect(requestBody.model).toBe("gpt-5-5-thinking");
+      expect(requestBody.model).toBe("gpt-5-5-pro");
       expect(requestBody).not.toHaveProperty("history_and_training_disabled");
       expect(requestBody.thinking_effort).toBe("extended");
     });

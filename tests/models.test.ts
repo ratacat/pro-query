@@ -37,7 +37,9 @@ describe("model discovery", () => {
 
     expect(result.source).toBe("static");
     expect(result.warning).toContain("No captured ChatGPT session token");
-    expect(result.models.map((model) => model.id)).toContain("auto");
+    expect(result.defaultModel).toBe("gpt-5-5-pro");
+    expect(result.models.map((model) => model.id)).not.toContain("auto");
+    expect(result.models.map((model) => model.id)).toContain("gpt-5-5-pro");
   });
 
   test("loads live ChatGPT model catalog with bearer auth", async () => {
@@ -53,15 +55,14 @@ describe("model discovery", () => {
           model_picker_version: 2,
           models: [
             {
-              slug: "gpt-5-5",
-              title: "GPT-5.5",
+              slug: "gpt-5-5-pro",
+              title: "GPT-5.5 Pro",
               max_tokens: 272000,
-              reasoning_type: "reasoning",
+              reasoning_type: "pro",
               configurable_thinking_effort: true,
               thinking_efforts: [
-                { thinking_effort: "min", short_label: "Light" },
                 { thinking_effort: "standard", short_label: "Standard" },
-                { thinking_effort: "max", short_label: "Heavy" },
+                { thinking_effort: "extended", short_label: "Extended" },
               ],
               enabled_tools: [{ type: "python" }, { type: "web" }],
             },
@@ -74,14 +75,15 @@ describe("model discovery", () => {
       expect(authHeader).toStartWith("Bearer ");
       expect(accountHeader).toBe("acct_test");
       expect(result.source).toBe("live");
-      expect(result.defaultModel).toBe("gpt-5-5");
+      expect(result.defaultModel).toBe("gpt-5-5-pro");
+      expect(result.chatgptDefaultModel).toBe("gpt-5-5");
       expect(result.modelPickerVersion).toBe(2);
-      expect(result.models[1]).toMatchObject({
-        id: "gpt-5-5",
-        label: "GPT-5.5",
+      expect(result.models[0]).toMatchObject({
+        id: "gpt-5-5-pro",
+        label: "GPT-5.5 Pro",
         default: true,
         maxTokens: 272000,
-        reasoningLevels: ["min", "standard", "max"],
+        reasoningLevels: ["standard", "extended"],
         enabledTools: ["python", "web"],
       });
     });

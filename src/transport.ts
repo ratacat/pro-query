@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { evaluateInCdpPage } from "./cdp";
+import { DEFAULT_MODEL, isReasoningLevel } from "./defaults";
 import { EXIT, ProError } from "./errors";
 import type { JobRecord } from "./jobs";
 import { isTokenFresh, loadSessionToken } from "./session-token";
@@ -814,7 +815,7 @@ interface PreparedChatRequirements {
 function buildRequestBody(job: JobRecord): Record<string, unknown> {
   const prompt = buildConversationPrompt(job);
   const thinkingEffort = normalizeReasoning(job.reasoning);
-  const model = normalizeModel(job.model, thinkingEffort);
+  const model = normalizeModel(job.model);
   const conversationId = stringOption(job.options.conversationId);
   const parentMessageId = stringOption(job.options.parentMessageId) ?? "client-created-root";
   const temporary = booleanOption(job.options.temporary, !conversationId);
@@ -851,9 +852,7 @@ function buildRequestBody(job: JobRecord): Record<string, unknown> {
     body.history_and_training_disabled = true;
     body.client_contextual_info = { app_name: "chatgpt.com" };
   }
-  if (model !== "auto" && thinkingEffort !== "auto") {
-    body.thinking_effort = thinkingEffort;
-  }
+  body.thinking_effort = thinkingEffort;
 
   return body;
 }
@@ -1032,19 +1031,22 @@ function readErrorMessage(event: Record<string, unknown>): string {
 }
 
 function normalizeReasoning(reasoning: string): string {
-  if (reasoning === "low") return "min";
-  if (reasoning === "medium") return "standard";
-  if (reasoning === "high") return "max";
-  if (["auto", "min", "standard", "extended", "max"].includes(reasoning)) return reasoning;
-  return "auto";
+  if (isReasoningLevel(reasoning)) return reasoning;
+  throw new ProError("INVALID_REASONING", `Unsupported reasoning level ${reasoning}.`, {
+    exitCode: EXIT.invalidArgs,
+    suggestions: ["Use min, standard, extended, or max."],
+  });
 }
 
-function normalizeModel(model: string, thinkingEffort: string): string {
-  if (!model || model === "auto") {
-    if (thinkingEffort === "auto") return "auto";
-    return "gpt-5-5-thinking";
+function normalizeModel(model: string): string {
+  const value = model.trim() || DEFAULT_MODEL;
+  if (value === "auto") {
+    throw new ProError("INVALID_MODEL", "The model auto is not supported.", {
+      exitCode: EXIT.invalidArgs,
+      suggestions: ["Use a concrete model id such as gpt-5-5-pro."],
+    });
   }
-  return model;
+  return value;
 }
 
 function stringOption(value: unknown): string | undefined {

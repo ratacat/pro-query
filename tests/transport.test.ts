@@ -53,8 +53,8 @@ describe("ChatGPT transport", () => {
       expect(expression).toContain("OpenAI-Sentinel-Chat-Requirements-Token");
       expect(expression).not.toContain("codex/responses");
       expect(expression).toContain('"action":"next"');
-      expect(expression).toContain('"model":"gpt-5-5-thinking"');
-      expect(expression).toContain('"thinking_effort":"min"');
+      expect(expression).toContain('"model":"gpt-5-5-pro"');
+      expect(expression).toContain('"thinking_effort":"standard"');
       expect(expression).toContain('"history_and_training_disabled":true');
       expect(expression).toContain("Use terse answers.\\n\\nReply with OK only.");
       expect(expression).not.toContain("header.");
@@ -269,8 +269,8 @@ function job(): JobRecord {
     id: "job_test",
     status: "running",
     prompt: "Reply with OK only.",
-    model: "auto",
-    reasoning: "low",
+    model: "gpt-5-5-pro",
+    reasoning: "standard",
     options: {
       instructions: "Use terse answers.",
       verbosity: "high",

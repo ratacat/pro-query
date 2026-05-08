@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL, REASONING_LEVELS } from "./defaults";
 import { isTokenFresh, loadSessionToken } from "./session-token";
 
 export interface ModelCapability {
@@ -10,7 +11,6 @@ export interface ModelCapability {
   reasoningType?: string;
   configurableThinkingEffort?: boolean;
   enabledTools?: string[];
-  aliasFor?: string;
 }
 
 export interface ModelList {
@@ -18,6 +18,7 @@ export interface ModelList {
   source: "static" | "live";
   warning?: string;
   defaultModel?: string;
+  chatgptDefaultModel?: string;
   modelPickerVersion?: number;
 }
 
@@ -71,28 +72,19 @@ export async function listModels(options: { sessionTokenPath: string }): Promise
       return listStaticModels("Live model discovery returned no usable model entries.");
     }
 
-    const defaultModel =
+    const chatgptDefaultModel =
       typeof payload.default_model_slug === "string" ? payload.default_model_slug : undefined;
     return {
       source: "live",
-      ...(defaultModel ? { defaultModel } : {}),
+      defaultModel: DEFAULT_MODEL,
+      ...(chatgptDefaultModel ? { chatgptDefaultModel } : {}),
       ...(typeof payload.model_picker_version === "number"
         ? { modelPickerVersion: payload.model_picker_version }
         : {}),
-      models: [
-        {
-          id: "auto",
-          label: "ChatGPT default",
-          source: "live",
-          reasoningLevels: ["auto", "low", "medium", "high", "extended", "min", "standard", "max"],
-          default: false,
-          ...(defaultModel ? { aliasFor: defaultModel } : {}),
-        },
-        ...liveModels.map((model) => ({
-          ...model,
-          default: model.id === defaultModel,
-        })),
-      ],
+      models: liveModels.map((model) => ({
+        ...model,
+        default: model.id === DEFAULT_MODEL,
+      })),
     };
   } catch {
     return listStaticModels("Live model discovery failed; using static fallback.");
@@ -102,12 +94,36 @@ export async function listModels(options: { sessionTokenPath: string }): Promise
 export function listStaticModels(warning?: string): ModelList {
   return {
     source: "static",
+    defaultModel: DEFAULT_MODEL,
     models: [
       {
-        id: "auto",
-        label: "ChatGPT default",
+        id: "gpt-5-5-pro",
+        label: "GPT-5.5 Pro",
         source: "static-unverified",
-        reasoningLevels: ["auto", "low", "medium", "high", "extended", "min", "standard", "max"],
+        reasoningLevels: ["standard", "extended"],
+        default: true,
+        reasoningType: "pro",
+      },
+      {
+        id: "gpt-5-4-pro",
+        label: "GPT-5.4 Pro",
+        source: "static-unverified",
+        reasoningLevels: ["standard", "extended"],
+        reasoningType: "pro",
+      },
+      {
+        id: "gpt-5-5-thinking",
+        label: "GPT-5.5 Thinking",
+        source: "static-unverified",
+        reasoningLevels: [...REASONING_LEVELS],
+        reasoningType: "reasoning",
+      },
+      {
+        id: "research",
+        label: "Deep Research",
+        source: "static-unverified",
+        reasoningLevels: [],
+        reasoningType: "none",
       },
     ],
     warning: warning ?? "Live model discovery requires a captured ChatGPT session token.",
@@ -119,7 +135,7 @@ function parseLiveModels(payload: LiveModelPayload): ModelCapability[] {
   return models
     .map((model) => {
       if (typeof model.slug !== "string" || typeof model.title !== "string") return null;
-      const reasoningLevels = parseReasoningLevels(model.thinking_efforts);
+      const reasoningLevels = parseReasoningLevels(model.thinking_efforts, model.reasoning_type);
       const enabledTools = parseEnabledTools(model.enabled_tools);
       const capability: ModelCapability = {
         id: model.slug,
@@ -135,18 +151,22 @@ function parseLiveModels(payload: LiveModelPayload): ModelCapability[] {
       };
       return capability;
     })
-    .filter((model): model is ModelCapability => model !== null);
+    .filter((model): model is ModelCapability => model !== null && model.id !== "auto");
 }
 
-function parseReasoningLevels(value: unknown): string[] {
-  if (!Array.isArray(value)) return ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
+function parseReasoningLevels(value: unknown, reasoningType: unknown): string[] {
+  if (reasoningType === "none") return [];
+  if (!Array.isArray(value)) {
+    if (reasoningType === "pro") return ["standard", "extended"];
+    return [...REASONING_LEVELS];
+  }
   const levels = value.flatMap((item) => {
     if (typeof item === "string") return [item];
     if (!item || typeof item !== "object") return [];
     const effort = (item as { thinking_effort?: unknown }).thinking_effort;
     return typeof effort === "string" ? [effort] : [];
   });
-  return levels.length > 0 ? levels : ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
+  return levels.length > 0 ? levels : [...REASONING_LEVELS];
 }
 
 function parseEnabledTools(value: unknown): string[] {

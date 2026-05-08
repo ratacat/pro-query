@@ -5,6 +5,7 @@ import { flagBoolean, flagString, parseArgs } from "./args";
 import { captureAuth, defaultCdpBase, getAuthStatus, getBrowserSessionStatus } from "./auth";
 import { loadConfig, migrateLegacyDefaultHome, resolvePaths, saveConfig } from "./config";
 import { ensureDaemonRunning, getDaemonStatus, runDaemonServer, stopDaemon } from "./daemon";
+import { DEFAULT_MODEL, DEFAULT_REASONING, REASONING_LEVELS, isReasoningLevel } from "./defaults";
 import { EXIT, ProError, toProError } from "./errors";
 import { buildEphemeralJob, executeEphemeralJob } from "./executor";
 import { JobStore, redactJob } from "./jobs";
@@ -12,8 +13,6 @@ import { listModels } from "./models";
 import type { CliIO } from "./output";
 import { writeError, writeSuccess } from "./output";
 import { updateProCli } from "./update";
-
-const REASONING_LEVELS = ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
 
 const HELP_TEXT =
   "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no daemon or job DB\njob create/wait: async jobs, auto-start local daemon\nupdate: fast-forward install\nUse --json for agents.";
@@ -97,8 +96,8 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         const prompt = await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd);
         const job = buildEphemeralJob({
           prompt,
-          model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
-          reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
+          model: resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL),
+          reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING),
           options: await collectRequestOptions(parsed.flags, io.cwd),
         });
         writeSuccess(io, mode, await executeEphemeralJob(job, paths));
@@ -108,8 +107,8 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         if (subcommand === "create") {
           const input = {
             prompt: await promptFromArgs(rest, io.cwd),
-            model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
-            reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
+            model: resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL),
+            reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING),
             options: await collectRequestOptions(parsed.flags, io.cwd),
           };
           if (!flagBoolean(parsed.flags, "no-start")) {
@@ -220,14 +219,18 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "config": {
         if (subcommand === "get") {
-          writeSuccess(io, mode, { config, paths: redactPaths(paths) });
+          writeSuccess(io, mode, {
+            config,
+            defaults: { model: DEFAULT_MODEL, reasoning: DEFAULT_REASONING },
+            paths: redactPaths(paths),
+          });
           return EXIT.success;
         }
         if (subcommand === "set") {
           const [key, value] = rest;
-          if (!key || !value) throw invalidArgs("Missing config key/value.", ["Use pro-cli config set model auto."]);
+          if (!key || !value) throw invalidArgs("Missing config key/value.", ["Use pro-cli config set model gpt-5-5-pro."]);
           const next = { ...config };
-          if (key === "model") next.defaultModel = value;
+          if (key === "model") next.defaultModel = resolveModel(value);
           else if (key === "reasoning") next.defaultReasoning = resolveReasoning(value);
           else throw invalidArgs(`Unknown config key ${key}.`, ["Supported keys: model, reasoning."]);
           await saveConfig(io.env, next);
@@ -354,7 +357,7 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
       {
         id: "smoke-test",
         status: ready ? "todo" : "blocked",
-        command: `pro-cli ask "Reply with OK only." --cdp ${authCommand.cdp} --reasoning low --json`,
+        command: `pro-cli ask "Reply with OK only." --cdp ${authCommand.cdp} --json`,
         note: "Verifies the live ChatGPT tab, captured auth, CDP port, and backend request path.",
       },
     ],
@@ -498,8 +501,18 @@ function setConversationOptions(
 }
 
 function resolveReasoning(reasoning: string): string {
-  if (REASONING_LEVELS.includes(reasoning)) return reasoning;
+  if (isReasoningLevel(reasoning)) return reasoning;
   throw invalidArgs("Invalid --reasoning.", [`Allowed values: ${REASONING_LEVELS.join(", ")}.`]);
+}
+
+function resolveModel(model: string): string {
+  const value = model.trim();
+  if (!value || value === "auto") {
+    throw invalidArgs("Invalid --model.", [
+      "Use a concrete model id such as gpt-5-5-pro, or run pro-cli models --json.",
+    ]);
+  }
+  return value;
 }
 
 function rejectUnsupportedFlags(

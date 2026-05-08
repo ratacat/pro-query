@@ -20,8 +20,8 @@ describe("job store", () => {
     await withStore(async (store) => {
       const created = store.create({
         prompt: "hello",
-        model: "auto",
-        reasoning: "low",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
         options: {},
       });
 
