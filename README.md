@@ -26,6 +26,14 @@ curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/instal
 
 The installer clones or fast-forwards `~/Projects/pro-cli`, runs `bun install`, runs `bun link`, and prints `pro-cli --version`. It does not touch auth, cookies, Chrome, or `~/.pro-cli`.
 
+Update an existing clean install:
+
+```sh
+pro-cli update --json
+```
+
+`update` verifies the checkout is `main` with the expected origin and no uncommitted changes, then runs `git pull --ff-only origin main`, `bun install`, and `bun link`.
+
 ## Setup
 
 `pro-cli` needs one logged-in ChatGPT Chrome window. `pro-cli` manages its local job daemon; you manage the browser login.
@@ -97,6 +105,7 @@ Setup and auth:
 
 ```sh
 pro-cli setup --json
+pro-cli update --json
 pro-cli auth command --json
 pro-cli auth capture --cdp http://127.0.0.1:9222 --json
 pro-cli doctor --json
@@ -148,6 +157,8 @@ pro-cli ask "follow up" --save --conversation <conversation-id> --parent <messag
 ```
 
 ## Thinking Modes
+
+By default, `pro-cli` sends `--model auto --reasoning auto`. That uses the model ChatGPT web selects for your logged-in account and sends no explicit `thinking_effort`.
 
 For most agent workflows:
 

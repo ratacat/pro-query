@@ -11,11 +11,12 @@ import { JobStore, redactJob } from "./jobs";
 import { listModels } from "./models";
 import type { CliIO } from "./output";
 import { writeError, writeSuccess } from "./output";
+import { updateProCli } from "./update";
 
 const REASONING_LEVELS = ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
 
 const HELP_TEXT =
-  "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no daemon or job DB\njob create/wait: async jobs, auto-start local daemon\nUse --json for agents.";
+  "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no daemon or job DB\njob create/wait: async jobs, auto-start local daemon\nupdate: fast-forward install\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -37,6 +38,11 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       command === "--help"
     ) {
       writeSuccess(io, mode, { text: HELP_TEXT, commands: commandList() });
+      return EXIT.success;
+    }
+
+    if (command === "update") {
+      writeSuccess(io, mode, updateProCli());
       return EXIT.success;
     }
 
@@ -271,6 +277,7 @@ function invalidArgs(message: string, suggestions: string[]): ProError {
 function commandList(): string[] {
   return [
     "setup",
+    "update",
     "auth command",
     "auth status",
     "auth capture",

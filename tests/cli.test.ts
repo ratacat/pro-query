@@ -52,7 +52,8 @@ describe("robot-mode CLI", () => {
     expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
     expect(result.stdout).toContain("ask: direct blocking query");
     expect(result.stdout).toContain("job create/wait: async jobs");
-    expect(result.stdout.length).toBeLessThan(220);
+    expect(result.stdout).toContain("update: fast-forward install");
+    expect(result.stdout.length).toBeLessThan(260);
     expect(result.stderr).toBe("");
   });
 
@@ -63,7 +64,8 @@ describe("robot-mode CLI", () => {
     expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
     expect(result.stdout).toContain("ask: direct blocking query");
     expect(result.stdout).toContain("job create/wait: async jobs");
-    expect(result.stdout.length).toBeLessThan(220);
+    expect(result.stdout).toContain("update: fast-forward install");
+    expect(result.stdout.length).toBeLessThan(260);
     expect(result.stderr).toBe("");
   });
 
@@ -74,6 +76,7 @@ describe("robot-mode CLI", () => {
     const payload = JSON.parse(result.stdout);
     expect(payload.ok).toBe(true);
     expect(payload.data.text).toContain("ask: direct blocking query");
+    expect(payload.data.commands).toContain("update");
     expect(payload.data.commands).toContain("auth capture");
   });
 

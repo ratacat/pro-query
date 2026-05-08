@@ -59,6 +59,9 @@ export function renderText(payload: unknown): string {
       typeof payload.next.command === "string" ? `\nnext: ${payload.next.command}` : "";
     return `pro-cli ${status}${command}`;
   }
+  if ("version" in payload && typeof payload.version === "string" && "repoRoot" in payload) {
+    return `pro-cli updated\n${payload.version}`;
+  }
   if ("job" in payload && isRecord(payload.job)) {
     const id = typeof payload.job.id === "string" ? payload.job.id : "unknown";
     const status = typeof payload.job.status === "string" ? payload.job.status : "unknown";
