@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { RuntimePaths } from "./config";
 import { EXIT, ProError, toProError } from "./errors";
-import { JobStore, redactJob, type JobRecord } from "./jobs";
+import { JobStore, redactJob, type JobRecord, type JobStatus } from "./jobs";
 import { runChatGptJob } from "./transport";
 
 export async function executeClaimedJob(
@@ -85,18 +85,74 @@ export async function waitForTerminalJob(
   timeoutMs: number,
   pollMs: number,
 ): Promise<JobRecord> {
+  const outcome = await waitForJob(store, jobId, timeoutMs, pollMs);
+  if (outcome.timedOut) throw waitTimeoutError(outcome);
+  return outcome.job;
+}
+
+export interface JobWaitOutcome {
+  job: JobRecord;
+  status: JobStatus;
+  timedOut: boolean;
+  elapsedMs: number;
+  timeoutMs: number;
+  pollMs: number;
+}
+
+export async function waitForJob(
+  store: JobStore,
+  jobId: string,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<JobWaitOutcome> {
   const start = Date.now();
   while (true) {
     const job = store.get(jobId);
-    if (job.status !== "queued" && job.status !== "running") return job;
-    if (timeoutMs > 0 && Date.now() - start >= timeoutMs) {
-      throw new ProError("WAIT_TIMEOUT", `Job ${jobId} is still ${job.status}.`, {
-        exitCode: EXIT.timeout,
-        suggestions: ["Run pro-cli job status <job-id> later.", "Use pro-cli job cancel <job-id> if this job is stale."],
-      });
+    const elapsedMs = Date.now() - start;
+    if (job.status !== "queued" && job.status !== "running") {
+      return {
+        job,
+        status: job.status,
+        timedOut: false,
+        elapsedMs,
+        timeoutMs,
+        pollMs,
+      };
+    }
+    if (timeoutMs > 0 && elapsedMs >= timeoutMs) {
+      return {
+        job,
+        status: job.status,
+        timedOut: true,
+        elapsedMs,
+        timeoutMs,
+        pollMs,
+      };
     }
     await sleep(pollMs);
   }
+}
+
+export function waitTimeoutError(outcome: JobWaitOutcome): ProError {
+  return new ProError(
+    "WAIT_TIMEOUT",
+    `Job ${outcome.job.id} is still ${outcome.status} after ${formatDuration(outcome.elapsedMs)}.`,
+    {
+      exitCode: EXIT.timeout,
+      suggestions: [
+        `Run pro-cli job wait ${outcome.job.id} --json without --wait-timeout.`,
+        `Run pro-cli job wait ${outcome.job.id} --soft-timeout ${outcome.timeoutMs} --json to poll without an error exit.`,
+        `Use pro-cli job cancel ${outcome.job.id} --json if this job is stale.`,
+      ],
+      details: {
+        job: redactJob(outcome.job),
+        status: outcome.status,
+        elapsedMs: outcome.elapsedMs,
+        timeoutMs: outcome.timeoutMs,
+        pollMs: outcome.pollMs,
+      },
+    },
+  );
 }
 
 function numberFromOption(value: unknown): number | undefined {
@@ -109,4 +165,13 @@ function stringFromOption(value: unknown): string | undefined {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1_000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
 }

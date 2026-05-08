@@ -15,7 +15,7 @@ import { writeError, writeSuccess } from "./output";
 import { updateProCli } from "./update";
 
 const HELP_TEXT =
-  "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no daemon or job DB\njob create/wait: async jobs, auto-start local daemon\nupdate: fast-forward install\nUse --json for agents.";
+  "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no job DB\njob create --wait: durable blocking query\njob wait: waits until done unless timeout flags are set\nupdate: fast-forward install\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -98,23 +98,51 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           prompt,
           model: resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL),
           reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING),
-          options: await collectRequestOptions(parsed.flags, io.cwd),
+          options: await collectRequestOptions(parsed.flags, io.cwd, ASK_REQUEST_FLAGS, "ask"),
         });
         writeSuccess(io, mode, await executeEphemeralJob(job, paths));
         return EXIT.success;
       }
       case "job": {
         if (subcommand === "create") {
+          const waitRequested = flagBoolean(parsed.flags, "wait");
+          if (!waitRequested && hasWaitOptionFlags(parsed.flags)) {
+            throw invalidArgs("Wait options require --wait.", [
+              "Use pro-cli job create @prompt.md --wait --soft-timeout <ms> --json.",
+            ]);
+          }
+          if (waitRequested && flagBoolean(parsed.flags, "no-start")) {
+            throw invalidArgs("Cannot wait for a job without starting the daemon.", [
+              "Remove --no-start or remove --wait.",
+            ]);
+          }
           const input = {
             prompt: await promptFromArgs(rest, io.cwd),
             model: resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL),
             reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING),
-            options: await collectRequestOptions(parsed.flags, io.cwd),
+            options: await collectRequestOptions(parsed.flags, io.cwd, JOB_CREATE_FLAGS, "job create"),
           };
           if (!flagBoolean(parsed.flags, "no-start")) {
             const daemon = await ensureDaemonRunning(paths, io);
+            const created = await daemon.client.createJob(input);
+            if (waitRequested) {
+              const waitOptions = parseWaitOptions(parsed.flags);
+              const jobId = jobIdFromPayload(created);
+              const waited = await daemon.client.wait(
+                jobId,
+                waitOptions.timeoutMs,
+                waitOptions.pollMs,
+                waitOptions.softTimeout,
+              );
+              writeSuccess(io, mode, {
+                ...waited,
+                ...(await resultIfSucceeded(daemon.client, jobId, waited)),
+                daemon: { started: daemon.started, status: daemon.status },
+              });
+              return EXIT.success;
+            }
             writeSuccess(io, mode, {
-              ...(await daemon.client.createJob(input)),
+              ...created,
               daemon: { started: daemon.started, status: daemon.status },
             });
             return EXIT.success;
@@ -160,10 +188,18 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         if (subcommand === "wait") {
           const jobId = rest[0];
           if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli job wait <job-id>."]);
-          const waitTimeoutMs = parseIntegerFlag(parsed.flags, "wait-timeout", 0, 0, 24 * 60 * 60_000);
-          const pollMs = parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000);
+          const waitOptions = parseWaitOptions(parsed.flags);
           const daemon = await ensureDaemonRunning(paths, io);
-          writeSuccess(io, mode, await daemon.client.wait(jobId, waitTimeoutMs, pollMs));
+          writeSuccess(
+            io,
+            mode,
+            await daemon.client.wait(
+              jobId,
+              waitOptions.timeoutMs,
+              waitOptions.pollMs,
+              waitOptions.softTimeout,
+            ),
+          );
           return EXIT.success;
         }
         if (subcommand === "cancel") {
@@ -413,8 +449,10 @@ async function promptFromArgs(args: string[], cwd: string): Promise<string> {
 async function collectRequestOptions(
   flags: Map<string, string | boolean | string[]>,
   cwd: string,
+  allowedFlags: Set<string>,
+  command: string,
 ): Promise<Record<string, unknown>> {
-  rejectUnsupportedFlags(flags, REQUEST_FLAGS, "ask/job create");
+  rejectUnsupportedFlags(flags, allowedFlags, command);
   const options: Record<string, unknown> = {};
   setStringOption(options, "verbosity", flags, "verbosity", ["low", "medium", "high"]);
   setStringOption(options, "reasoningSummary", flags, "reasoning-summary", [
@@ -447,7 +485,7 @@ async function collectRequestOptions(
   return options;
 }
 
-const REQUEST_FLAGS = new Set([
+const ASK_REQUEST_FLAGS = new Set([
   "json",
   "no-json",
   "model",
@@ -467,9 +505,17 @@ const REQUEST_FLAGS = new Set([
   "no-temporary",
   "conversation",
   "parent",
-  "no-start",
   "cdp",
   "port",
+]);
+
+const JOB_CREATE_FLAGS = new Set([
+  ...ASK_REQUEST_FLAGS,
+  "no-start",
+  "wait",
+  "wait-timeout",
+  "soft-timeout",
+  "poll-ms",
 ]);
 
 function setConversationOptions(
@@ -594,6 +640,58 @@ function readBooleanFlag(
   throw invalidArgs(`Invalid --${source}.`, ["Use true or false."]);
 }
 
+interface WaitOptions {
+  timeoutMs: number;
+  pollMs: number;
+  softTimeout: boolean;
+}
+
+function parseWaitOptions(flags: Map<string, string | boolean | string[]>): WaitOptions {
+  const waitTimeout = flagString(flags, "wait-timeout");
+  const softTimeout = flagString(flags, "soft-timeout");
+  if (waitTimeout !== undefined && softTimeout !== undefined) {
+    throw invalidArgs("Choose one wait timeout mode.", [
+      "Use --wait-timeout for an error on timeout or --soft-timeout for ok:true polling.",
+    ]);
+  }
+  return {
+    timeoutMs:
+      softTimeout !== undefined
+        ? parseIntegerFlag(flags, "soft-timeout", 0, 1, 24 * 60 * 60_000)
+        : parseIntegerFlag(flags, "wait-timeout", 0, 0, 24 * 60 * 60_000),
+    pollMs: parseIntegerFlag(flags, "poll-ms", 500, 25, 60_000),
+    softTimeout: softTimeout !== undefined,
+  };
+}
+
+function hasWaitOptionFlags(flags: Map<string, string | boolean | string[]>): boolean {
+  return (
+    flagString(flags, "wait-timeout") !== undefined ||
+    flagString(flags, "soft-timeout") !== undefined ||
+    flagString(flags, "poll-ms") !== undefined
+  );
+}
+
+function jobIdFromPayload(payload: Record<string, unknown>): string {
+  const job = payload.job;
+  if (isRecord(job) && typeof job.id === "string") return job.id;
+  throw new ProError("DAEMON_BAD_RESPONSE", "Daemon create response did not include a job id.", {
+    exitCode: EXIT.internal,
+    suggestions: ["Run pro-cli daemon restart --json and retry."],
+  });
+}
+
+async function resultIfSucceeded(
+  client: { result: (jobId: string) => Promise<Record<string, unknown>> },
+  jobId: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const job = payload.job;
+  if (!isRecord(job) || job.status !== "succeeded") return {};
+  const result = await client.result(jobId);
+  return typeof result.result === "string" ? { result: result.result } : {};
+}
+
 function parseIntegerFlag(
   flags: Map<string, string | boolean | string[]>,
   source: string,
@@ -623,6 +721,10 @@ function parseOptionalIntegerFlag(
     throw invalidArgs(`Invalid --${source}.`, [`Use an integer between ${min} and ${max}.`]);
   }
   return number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function redactPaths(paths: { home: string; configPath: string; dbPath: string }): {

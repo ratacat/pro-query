@@ -65,6 +65,11 @@ export function renderText(payload: unknown): string {
   if ("job" in payload && isRecord(payload.job)) {
     const id = typeof payload.job.id === "string" ? payload.job.id : "unknown";
     const status = typeof payload.job.status === "string" ? payload.job.status : "unknown";
+    if ("wait" in payload && isRecord(payload.wait) && payload.wait.timedOut === true) {
+      const elapsed =
+        typeof payload.wait.elapsedMs === "number" ? ` after ${payload.wait.elapsedMs}ms` : "";
+      return `job ${id} still ${status}${elapsed}\nwait: pro-cli job wait ${id}`;
+    }
     const resultHint =
       status === "succeeded" ? `\nresult: pro-cli job result ${id}` : `\nwait: pro-cli job wait ${id}`;
     return `job ${id} ${status}${resultHint}`;

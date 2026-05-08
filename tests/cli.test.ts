@@ -51,7 +51,8 @@ describe("robot-mode CLI", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
     expect(result.stdout).toContain("ask: direct blocking query");
-    expect(result.stdout).toContain("job create/wait: async jobs");
+    expect(result.stdout).toContain("job create --wait: durable blocking query");
+    expect(result.stdout).toContain("job wait: waits until done");
     expect(result.stdout).toContain("update: fast-forward install");
     expect(result.stdout.length).toBeLessThan(260);
     expect(result.stderr).toBe("");
@@ -63,7 +64,8 @@ describe("robot-mode CLI", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
     expect(result.stdout).toContain("ask: direct blocking query");
-    expect(result.stdout).toContain("job create/wait: async jobs");
+    expect(result.stdout).toContain("job create --wait: durable blocking query");
+    expect(result.stdout).toContain("job wait: waits until done");
     expect(result.stdout).toContain("update: fast-forward install");
     expect(result.stdout.length).toBeLessThan(260);
     expect(result.stderr).toBe("");
@@ -369,6 +371,48 @@ describe("robot-mode CLI", () => {
       const payload = JSON.parse(result.stderr);
       expect(payload.error.code).toBe("INVALID_ARGS");
       expect(payload.error.message).toContain("both ids");
+    });
+  });
+
+  test("job create cannot wait with no-start", async () => {
+    await withHome(async (home) => {
+      const result = await run(["job", "create", "hello", "--wait", "--no-start", "--json"], {
+        tty: true,
+        home,
+      });
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("without starting the daemon");
+    });
+  });
+
+  test("job create rejects wait options without wait mode", async () => {
+    await withHome(async (home) => {
+      const result = await run(["job", "create", "hello", "--soft-timeout", "1000", "--json"], {
+        tty: true,
+        home,
+      });
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("Wait options require --wait");
+    });
+  });
+
+  test("job wait rejects mixed timeout modes before contacting the daemon", async () => {
+    await withHome(async (home) => {
+      const result = await run(
+        ["job", "wait", "job_fake", "--wait-timeout", "1", "--soft-timeout", "1", "--json"],
+        { tty: true, home },
+      );
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("Choose one wait timeout mode");
     });
   });
 

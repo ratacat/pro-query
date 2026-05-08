@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import type { RuntimePaths } from "./config";
 import { ensurePrivateDir, writePrivateFile } from "./config";
 import { EXIT, ProError, type ErrorPayload, type ExitCode, toProError } from "./errors";
-import { executeClaimedJob, waitForTerminalJob } from "./executor";
+import { executeClaimedJob, waitForJob, waitTimeoutError, type JobWaitOutcome } from "./executor";
 import { JobStore, redactJob, type CreateJobInput } from "./jobs";
 import type { CliIO } from "./output";
 
@@ -69,8 +69,17 @@ export class DaemonClient {
     return this.request("GET", `/jobs/${encodeURIComponent(jobId)}/result`);
   }
 
-  async wait(jobId: string, timeoutMs: number, pollMs: number): Promise<Record<string, unknown>> {
-    return this.request("POST", `/jobs/${encodeURIComponent(jobId)}/wait`, { timeoutMs, pollMs });
+  async wait(
+    jobId: string,
+    timeoutMs: number,
+    pollMs: number,
+    softTimeout = false,
+  ): Promise<Record<string, unknown>> {
+    return this.request("POST", `/jobs/${encodeURIComponent(jobId)}/wait`, {
+      timeoutMs,
+      pollMs,
+      softTimeout,
+    });
   }
 
   async cancel(jobId: string): Promise<Record<string, unknown>> {
@@ -422,16 +431,14 @@ async function routeDaemonRequest(
   if (request.method === "POST" && parts[2] === "wait") {
     const body = await readJsonBody(request);
     queueMicrotask(() => void control.pumpQueue());
-    return {
-      job: redactJob(
-        await waitForTerminalJob(
-          store,
-          jobId,
-          numberFromPayload(body.timeoutMs, 0),
-          numberFromPayload(body.pollMs, DEFAULT_DAEMON_POLL_MS),
-        ),
-      ),
-    };
+    const outcome = await waitForJob(
+      store,
+      jobId,
+      numberFromPayload(body.timeoutMs, 0),
+      numberFromPayload(body.pollMs, DEFAULT_DAEMON_POLL_MS),
+    );
+    if (outcome.timedOut && body.softTimeout !== true) throw waitTimeoutError(outcome);
+    return waitPayload(outcome);
   }
 
   throw new ProError("DAEMON_ROUTE_NOT_FOUND", `No daemon route for ${request.method} ${url.pathname}.`, {
@@ -513,6 +520,27 @@ function parseLimit(raw: string | null): number {
 
 function numberFromPayload(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function waitPayload(outcome: JobWaitOutcome): Record<string, unknown> {
+  return {
+    job: redactJob(outcome.job),
+    wait: {
+      status: outcome.status,
+      timedOut: outcome.timedOut,
+      elapsedMs: outcome.elapsedMs,
+      timeoutMs: outcome.timeoutMs,
+      pollMs: outcome.pollMs,
+    },
+    ...(outcome.timedOut
+      ? {
+          next: {
+            command: `pro-cli job wait ${outcome.job.id} --json`,
+            reason: "The job is still running. Wait again without a timeout, or use another soft timeout poll.",
+          },
+        }
+      : {}),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

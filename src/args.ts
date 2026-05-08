@@ -14,6 +14,7 @@ const BOOLEAN_FLAGS = new Set([
   "save",
   "temporary",
   "no-temporary",
+  "wait",
   "help",
   "version",
 ]);

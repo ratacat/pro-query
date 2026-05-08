@@ -94,7 +94,7 @@ pro-cli doctor --json
 Put this in a user-level or project-level agent instructions file:
 
 ```md
-Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, Pro thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --json`, then `pro-cli job wait <job-id> --json` and `pro-cli job result <job-id> --json`. `pro-cli` defaults to `gpt-5-5-pro` with `standard` reasoning; pass `--reasoning extended` only when the prompt needs deeper Pro reasoning. `job create` and `job wait` manage the local daemon. For a direct blocking query, use `pro-cli ask @prompt.md --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
+Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, Pro thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --wait --json` for a blocking durable query, or `pro-cli job create @prompt.md --json`, `pro-cli job wait <job-id> --json`, and `pro-cli job result <job-id> --json` when you need separate steps. `pro-cli` defaults to `gpt-5-5-pro` with `standard` reasoning; pass `--reasoning extended` only when the prompt needs deeper Pro reasoning. `job create` and `job wait` manage the local daemon. Do not add `--wait-timeout` unless you need a hard local command budget; a timeout means the job is still running, not failed. For a direct blocking query, use `pro-cli ask @prompt.md --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
 ```
 
 ## Commands
@@ -124,12 +124,16 @@ Async jobs:
 
 ```sh
 pro-cli job create @prompt.md --json
+pro-cli job create @prompt.md --wait --json
 pro-cli job create @prompt.md --reasoning extended --json
-pro-cli job wait <job-id> --wait-timeout 60000 --json
+pro-cli job wait <job-id> --json
+pro-cli job wait <job-id> --soft-timeout 60000 --json
 pro-cli job result <job-id> --json
 pro-cli job cancel <job-id> --json
 pro-cli job list --limit 20 --json
 ```
+
+`job wait` without a timeout waits until the job succeeds, fails, or is cancelled. Long prompts and `--reasoning extended` can run for several minutes. Use `--soft-timeout <ms>` when an agent needs to poll without a nonzero exit. Use `--wait-timeout <ms>` only when a timeout should fail the local command.
 
 Daemon:
 
@@ -203,6 +207,15 @@ pro-cli models --json
 --timeout <ms>
 --retries <0..5>
 --retry-delay <ms>
+```
+
+Job wait controls:
+
+```sh
+--wait
+--soft-timeout <ms>
+--wait-timeout <ms>
+--poll-ms <ms>
 ```
 
 Unsupported request flags fail loudly. Errors include `code`, `message`, and `suggestions`.
