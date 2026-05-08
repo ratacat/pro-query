@@ -16,7 +16,7 @@ async function withStore<T>(fn: (store: JobStore) => Promise<T>): Promise<T> {
 }
 
 describe("job store", () => {
-  test("late worker success does not overwrite cancellation", async () => {
+  test("late runner success does not overwrite cancellation", async () => {
     await withStore(async (store) => {
       const created = store.create({
         prompt: "hello",

@@ -145,6 +145,13 @@ export class JobStore {
     return result.changes && result.changes > 0 ? this.get(id) : null;
   }
 
+  claimNextQueued(): JobRecord | null {
+    const row = this.db
+      .query("SELECT id FROM jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1")
+      .get("queued") as { id: string } | null;
+    return row ? this.claimQueued(row.id) : null;
+  }
+
   markSucceeded(id: string, result: string): JobRecord {
     this.finishRunning(id, { status: "succeeded", result, error: null });
     return this.get(id);

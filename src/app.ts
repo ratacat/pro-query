@@ -1,23 +1,21 @@
-import { mkdirSync } from "node:fs";
-import { openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
 import packageJson from "../package.json" with { type: "json" };
 import { flagBoolean, flagString, parseArgs } from "./args";
 import { captureAuth, defaultCdpBase, getAuthStatus, getBrowserSessionStatus } from "./auth";
-import { loadConfig, resolvePaths, saveConfig } from "./config";
+import { loadConfig, migrateLegacyDefaultHome, resolvePaths, saveConfig } from "./config";
+import { ensureDaemonRunning, getDaemonStatus, runDaemonServer, stopDaemon } from "./daemon";
 import { EXIT, ProError, toProError } from "./errors";
+import { buildEphemeralJob, executeEphemeralJob } from "./executor";
 import { JobStore, redactJob } from "./jobs";
 import { listModels } from "./models";
 import type { CliIO } from "./output";
 import { writeError, writeSuccess } from "./output";
-import { runChatGptJob } from "./transport";
 
 const REASONING_LEVELS = ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
 
 const HELP_TEXT =
-  "pro-cli: ChatGPT Pro CLI\nsetup, auth command, auth capture, auth status, models, run, submit, wait, result, jobs, doctor\nUse --json for agents.";
+  "pro-cli: ChatGPT Pro CLI\nsetup, auth command, auth capture, auth status, models, run, submit, wait, result, jobs, daemon, doctor\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -42,6 +40,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       return EXIT.success;
     }
 
+    await migrateLegacyDefaultHome(io.env);
     const config = await loadConfig(io.env);
     const paths = resolvePaths(io.env, config);
 
@@ -89,18 +88,24 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         return EXIT.success;
       }
       case "submit": {
-        const prompt = await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd);
+        const input = {
+          prompt: await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd),
+          model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
+          reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
+          options: await collectSubmitOptions(parsed.flags, io.cwd),
+        };
+        if (!flagBoolean(parsed.flags, "no-start")) {
+          const daemon = await ensureDaemonRunning(paths, io);
+          writeSuccess(io, mode, {
+            ...(await daemon.client.submit(input)),
+            daemon: { started: daemon.started, status: daemon.status },
+          });
+          return EXIT.success;
+        }
         const store = await JobStore.open(paths.dbPath);
         try {
-          const job = store.create({
-            prompt,
-            model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
-            reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
-            options: await collectSubmitOptions(parsed.flags, io.cwd),
-          });
-          const workerStarted = !flagBoolean(parsed.flags, "no-start");
-          if (workerStarted) startBackgroundWorker(job.id, io, paths.home);
-          writeSuccess(io, mode, { job, worker: { started: workerStarted } });
+          const job = store.create(input);
+          writeSuccess(io, mode, { job, daemon: { started: false } });
           return EXIT.success;
         } finally {
           store.close();
@@ -108,31 +113,41 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       }
       case "run": {
         const prompt = await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd);
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          const created = store.create({
-            prompt,
-            model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
-            reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
-            options: await collectSubmitOptions(parsed.flags, io.cwd),
-          });
-          const executed = await executeQueuedJob(store, created.id, paths);
-          writeSuccess(io, mode, executed);
-          return EXIT.success;
-        } finally {
-          store.close();
-        }
+        const job = buildEphemeralJob({
+          prompt,
+          model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
+          reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
+          options: await collectSubmitOptions(parsed.flags, io.cwd),
+        });
+        writeSuccess(io, mode, await executeEphemeralJob(job, paths));
+        return EXIT.success;
       }
-      case "worker": {
-        const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli worker <job-id>."]);
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths));
+      case "daemon": {
+        if (subcommand === "run") {
+          await runDaemonServer(paths, {
+            port: parseOptionalIntegerFlag(parsed.flags, "port", 0, 65_535),
+            pollMs: parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000),
+            idleTimeoutMs: parseOptionalIntegerFlag(parsed.flags, "idle-timeout", 1, 24 * 60 * 60_000),
+          });
           return EXIT.success;
-        } finally {
-          store.close();
         }
+        if (subcommand === "start" || subcommand === "restart") {
+          if (subcommand === "restart") await stopDaemon(paths);
+          const daemon = await ensureDaemonRunning(paths, io);
+          writeSuccess(io, mode, { daemon: { started: daemon.started, status: daemon.status } });
+          return EXIT.success;
+        }
+        if (subcommand === "status") {
+          writeSuccess(io, mode, { daemon: await getDaemonStatus(paths) });
+          return EXIT.success;
+        }
+        if (subcommand === "stop") {
+          writeSuccess(io, mode, { daemon: await stopDaemon(paths) });
+          return EXIT.success;
+        }
+        throw invalidArgs("Unknown daemon command.", [
+          "Use pro-cli daemon start, pro-cli daemon status, pro-cli daemon stop, or pro-cli daemon restart.",
+        ]);
       }
       case "status": {
         const jobId = subcommand;
@@ -168,33 +183,16 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli wait <job-id>."]);
         const waitTimeoutMs = parseIntegerFlag(parsed.flags, "wait-timeout", 0, 0, 24 * 60 * 60_000);
         const pollMs = parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000);
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          const job = store.get(jobId);
-          if (job.status === "queued") {
-            writeSuccess(io, mode, await executeQueuedJob(store, jobId, paths));
-            return EXIT.success;
-          }
-          if (job.status === "running") {
-            writeSuccess(io, mode, { job: redactJob(await waitForTerminalJob(store, jobId, waitTimeoutMs, pollMs)) });
-            return EXIT.success;
-          }
-          writeSuccess(io, mode, { job: redactJob(job) });
-          return EXIT.success;
-        } finally {
-          store.close();
-        }
+        const daemon = await ensureDaemonRunning(paths, io);
+        writeSuccess(io, mode, await daemon.client.wait(jobId, waitTimeoutMs, pollMs));
+        return EXIT.success;
       }
       case "cancel": {
         const jobId = subcommand;
         if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli cancel <job-id>."]);
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          writeSuccess(io, mode, { job: store.cancel(jobId) });
-          return EXIT.success;
-        } finally {
-          store.close();
-        }
+        const daemon = await ensureDaemonRunning(paths, io);
+        writeSuccess(io, mode, await daemon.client.cancel(jobId));
+        return EXIT.success;
       }
       case "jobs": {
         const limit = Number(flagString(parsed.flags, "limit") ?? "20");
@@ -239,6 +237,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         writeSuccess(io, mode, {
           auth,
           browserSession,
+          daemon: await getDaemonStatus(paths),
           ready,
           next: buildDoctorNext(authReady, browserSession.status, cdpBase),
           storage: { home: paths.home, dbPath: paths.dbPath },
@@ -278,6 +277,9 @@ function commandList(): string[] {
     "wait",
     "cancel",
     "jobs",
+    "daemon start",
+    "daemon status",
+    "daemon stop",
     "config get",
     "doctor",
   ];
@@ -329,7 +331,7 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
         id: "open-chatgpt",
         status: ready ? "done" : "todo",
         command: authCommand.command,
-        note: "Starts the dedicated ~/.pro Chrome profile with CDP enabled; keep this window open while pro-cli jobs run.",
+        note: "Starts the dedicated ~/.pro-cli Chrome profile with CDP enabled; keep this window open while pro-cli jobs run.",
       },
       {
         id: "capture-auth",
@@ -380,7 +382,7 @@ function safetySummary(): Record<string, unknown> {
     storedLocally: true,
     fileModes: "0600 files, 0700 directories where supported",
     sentTo: ["https://chatgpt.com"],
-    reminder: "Cookie and token files are sensitive; do not commit, paste, or share ~/.pro.",
+    reminder: "Cookie and token files are sensitive; do not commit, paste, or share ~/.pro-cli.",
   };
 }
 
@@ -502,71 +504,6 @@ function rejectUnsupportedFlags(
   }
 }
 
-async function executeQueuedJob(
-  store: JobStore,
-  jobId: string,
-  paths: ReturnType<typeof resolvePaths>,
-): Promise<Record<string, unknown>> {
-  const claimed = store.claimQueued(jobId);
-  if (!claimed) return { job: redactJob(store.get(jobId)) };
-  try {
-    const result = await runChatGptJob(claimed, {
-      sessionTokenPath: paths.sessionTokenPath,
-      cdpBase: stringFromOption(claimed.options.cdpBase),
-      timeoutMs: numberFromOption(claimed.options.timeoutMs),
-      retries: numberFromOption(claimed.options.retries),
-      retryDelayMs: numberFromOption(claimed.options.retryDelayMs),
-    });
-    const completed = store.markSucceeded(jobId, result);
-    return { job: redactJob(completed), result };
-  } catch (error) {
-    const proError = toProError(error);
-    return {
-      job: redactJob(store.markFailed(jobId, proError)),
-      error: proError.toPayload(),
-    };
-  }
-}
-
-function startBackgroundWorker(jobId: string, io: CliIO, home: string): void {
-  const cliPath = new URL("./cli.ts", import.meta.url).pathname;
-  const logDir = join(home, "workers");
-  mkdirSync(logDir, { recursive: true, mode: 0o700 });
-  const logPath = join(logDir, `${jobId}.log`);
-  const env = { ...process.env };
-  for (const [key, value] of Object.entries(io.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  const logFd = openSync(logPath, "a", 0o600);
-  const child = spawn(process.execPath, [cliPath, "worker", jobId, "--json"], {
-    cwd: io.cwd,
-    detached: true,
-    env,
-    stdio: ["ignore", logFd, logFd],
-  });
-  child.unref();
-}
-
-async function waitForTerminalJob(
-  store: JobStore,
-  jobId: string,
-  timeoutMs: number,
-  pollMs: number,
-): Promise<ReturnType<JobStore["get"]>> {
-  const start = Date.now();
-  while (true) {
-    const job = store.get(jobId);
-    if (job.status !== "running") return job;
-    if (timeoutMs > 0 && Date.now() - start >= timeoutMs) {
-      throw new ProError("WAIT_TIMEOUT", `Job ${jobId} is still running.`, {
-        exitCode: EXIT.timeout,
-        suggestions: ["Run pro-cli status <job-id> later.", "Use pro-cli cancel <job-id> if this job is stale."],
-      });
-    }
-    await sleep(pollMs);
-  }
-}
-
 async function readMaybeAtFile(value: string, cwd: string): Promise<string> {
   if (value.startsWith("@") && !value.includes(" ")) {
     return readFile(new URL(value.slice(1), `file://${cwd}/`), "utf8");
@@ -648,16 +585,19 @@ function parseIntegerFlag(
   return number;
 }
 
-function numberFromOption(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
-}
-
-function stringFromOption(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+function parseOptionalIntegerFlag(
+  flags: Map<string, string | boolean | string[]>,
+  source: string,
+  min: number,
+  max: number,
+): number | undefined {
+  const value = flagString(flags, source);
+  if (value === undefined) return undefined;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < min || number > max) {
+    throw invalidArgs(`Invalid --${source}.`, [`Use an integer between ${min} and ${max}.`]);
+  }
+  return number;
 }
 
 function redactPaths(paths: { home: string; configPath: string; dbPath: string }): {

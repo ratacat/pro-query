@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
@@ -19,8 +19,31 @@ export interface RuntimePaths {
   dbPath: string;
 }
 
+const DEFAULT_HOME = "~/.pro-cli";
+const LEGACY_HOME = "~/.pro";
+
 export function resolveHome(env: Record<string, string | undefined>): string {
-  return expandPath(env.PRO_HOME ?? "~/.pro");
+  return expandPath(env.PRO_CLI_HOME ?? DEFAULT_HOME);
+}
+
+export async function migrateLegacyDefaultHome(env: Record<string, string | undefined>): Promise<void> {
+  if (env.PRO_CLI_HOME) return;
+  const nextHome = expandPath(DEFAULT_HOME);
+  const legacyHome = expandPath(LEGACY_HOME);
+  if (await pathExists(nextHome)) {
+    await rewriteMigratedConfigPaths(nextHome, legacyHome);
+    return;
+  }
+  if (!(await pathExists(legacyHome))) return;
+  try {
+    await rename(legacyHome, nextHome);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM" || code === "EXDEV") return;
+    throw error;
+  }
+  await chmod(nextHome, 0o700).catch(() => undefined);
+  await rewriteMigratedConfigPaths(nextHome, legacyHome);
 }
 
 export function resolvePaths(
@@ -79,4 +102,39 @@ export function expandPath(path: string): string {
   if (path === "~") return homedir();
   if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
   return resolve(path);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function rewriteMigratedConfigPaths(nextHome: string, legacyHome: string): Promise<void> {
+  const configPath = join(nextHome, "config.json");
+  let raw: string;
+  try {
+    raw = await readFile(configPath, "utf8");
+  } catch {
+    return;
+  }
+
+  const config = JSON.parse(raw) as ProConfig;
+  const rewritten: ProConfig = {
+    ...config,
+    cookieJsonPath: rewriteHomePrefix(config.cookieJsonPath, legacyHome, nextHome),
+    cookieJarPath: rewriteHomePrefix(config.cookieJarPath, legacyHome, nextHome),
+    sessionTokenPath: rewriteHomePrefix(config.sessionTokenPath, legacyHome, nextHome),
+  };
+  await writePrivateFile(configPath, `${JSON.stringify(rewritten, null, 2)}\n`);
+}
+
+function rewriteHomePrefix(path: string | undefined, fromHome: string, toHome: string): string | undefined {
+  if (!path) return undefined;
+  if (path === fromHome) return toHome;
+  const prefix = `${fromHome}/`;
+  return path.startsWith(prefix) ? join(toHome, path.slice(prefix.length)) : path;
 }

@@ -871,7 +871,7 @@ function readResponseText(raw: string): string {
   let buffer = raw;
   let completedText: string | null = null;
   let completed = false;
-  const state: ResponseParseState = { acceptsTextContinuation: false };
+  const state: ResponseParseState = { acceptsTextContinuation: false, lastAppendText: null };
 
   let boundary = buffer.indexOf("\n\n");
   while (boundary !== -1) {
@@ -915,6 +915,7 @@ function readResponseText(raw: string): string {
 
 interface ResponseParseState {
   acceptsTextContinuation: boolean;
+  lastAppendText: string | null;
 }
 
 function mergeStreamText(current: string | null, next: string, append: boolean): string {
@@ -979,10 +980,13 @@ function readConversationMessageText(event: Record<string, unknown>): string | n
 function readPatchAppendText(event: Record<string, unknown>, state: ResponseParseState): string | null {
   if (event.o === "append" && isMessageContentPartPath(event.p) && typeof event.v === "string") {
     state.acceptsTextContinuation = true;
-    return event.v;
+    return readNewAppendText(event.v, state);
   }
-  if (typeof event.v === "string" && state.acceptsTextContinuation) return event.v;
+  if (typeof event.v === "string" && state.acceptsTextContinuation) {
+    return readNewAppendText(event.v, state);
+  }
   state.acceptsTextContinuation = false;
+  state.lastAppendText = null;
   if (event.o !== "patch" || !Array.isArray(event.v)) return null;
   const chunks = event.v
     .filter((patch): patch is { o: unknown; p: unknown; v: unknown } => Boolean(patch) && typeof patch === "object")
@@ -995,11 +999,17 @@ function readPatchAppendText(event: Record<string, unknown>, state: ResponsePars
     .map((patch) => patch.v);
   if (chunks.length === 0) return null;
   state.acceptsTextContinuation = true;
-  return chunks.join("");
+  return readNewAppendText(chunks.join(""), state);
 }
 
 function isMessageContentPartPath(path: unknown): boolean {
   return typeof path === "string" && /^\/message\/content\/parts\/\d+$/.test(path);
+}
+
+function readNewAppendText(text: string, state: ResponseParseState): string | null {
+  if (text === state.lastAppendText) return null;
+  state.lastAppendText = text;
+  return text;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

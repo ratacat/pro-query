@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -38,7 +38,7 @@ async function run(args: string[], options: { tty?: boolean; home?: string } = {
       stderr += text;
     },
     stdoutIsTTY: options.tty ?? false,
-    env: { PRO_HOME: options.home },
+    env: { PRO_CLI_HOME: options.home },
     cwd: process.cwd(),
   });
   return { code, stdout, stderr };
@@ -198,7 +198,7 @@ describe("robot-mode CLI", () => {
       const created = JSON.parse(submit.stdout);
       const jobId = created.data.job.id;
       expect(created.data.job.status).toBe("queued");
-      expect(created.data.worker.started).toBe(false);
+      expect(created.data.daemon.started).toBe(false);
       expect(created.data.job.prompt).toBe("");
       expect(created.data.job.promptPreview).toBe("hello from agent");
 
@@ -208,21 +208,31 @@ describe("robot-mode CLI", () => {
     });
   });
 
-  test("wait marks queued jobs failed when session token is missing", async () => {
+  test("run reports missing session token without durable job storage", async () => {
     await withHome(async (home) => {
-      const submit = await run(["submit", "hello", "--no-start", "--json"], { tty: true, home });
-      const jobId = JSON.parse(submit.stdout).data.job.id;
+      const result = await run(["run", "hello", "--json"], { tty: true, home });
 
-      const wait = await run(["wait", jobId, "--json"], { tty: true, home });
-
-      expect(wait.code).toBe(0);
-      const payload = JSON.parse(wait.stdout);
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
       expect(payload.data.job.status).toBe("failed");
       expect(payload.data.error.code).toBe("SESSION_TOKEN_MISSING");
+      await expect(access(join(home, "jobs.sqlite"))).rejects.toThrow();
     });
   });
 
-  test("run creates a job, executes it, and returns the full result", async () => {
+  test("daemon status is stopped before startup", async () => {
+    await withHome(async (home) => {
+      const result = await run(["daemon", "status", "--json"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.daemon.state).toBe("stopped");
+      expect(payload.data.daemon.home).toBe(home);
+      expect(payload.data.daemon.endpointPath).toContain("pro-cli-");
+    });
+  });
+
+  test("run executes without durable job storage and returns the full result", async () => {
     await withHome(async (home) => {
       await mkdir(join(home, "tokens"), { recursive: true });
       await writeFile(
@@ -267,6 +277,7 @@ describe("robot-mode CLI", () => {
       expect(payload.data.job.prompt).toBe("");
       expect(payload.data.job.options.temporary).toBe(true);
       expect(payload.data.result).toBe("OK");
+      await expect(access(join(home, "jobs.sqlite"))).rejects.toThrow();
       const requestBody = requestBodyFromExpression(expression);
       expect(requestBody.model).toBe("gpt-5-5-thinking");
       expect(requestBody.thinking_effort).toBe("max");

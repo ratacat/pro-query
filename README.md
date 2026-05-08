@@ -24,11 +24,11 @@ To choose the checkout path:
 curl -fsSL https://raw.githubusercontent.com/ratacat/pro-cli/main/scripts/install.sh | PRO_INSTALL_DIR="$HOME/Projects/pro-cli" bash
 ```
 
-The installer clones or fast-forwards `~/Projects/pro-cli`, runs `bun install`, runs `bun link`, and prints `pro-cli --version`. It does not touch auth, cookies, Chrome, or `~/.pro`.
+The installer clones or fast-forwards `~/Projects/pro-cli`, runs `bun install`, runs `bun link`, and prints `pro-cli --version`. It does not touch auth, cookies, Chrome, or `~/.pro-cli`.
 
 ## Setup
 
-`pro-cli` needs one logged-in ChatGPT Chrome window. That window is the runtime.
+`pro-cli` needs one logged-in ChatGPT Chrome window. `pro-cli` manages its local job daemon; you manage the browser login.
 
 Choose one auth path; you do not need both. Both end with the same local `pro-cli` auth state.
 
@@ -37,7 +37,7 @@ Choose one auth path; you do not need both. Both end with the same local `pro-cl
 Use this when you are already logged in to ChatGPT in Chrome and trust the current agent with temporary local browser access:
 
 ```txt
-I am logged in to ChatGPT in Chrome. Set up pro-cli auth from my existing Chrome profile. Store only scoped ChatGPT/OpenAI auth under ~/.pro, do not print raw cookies or tokens, then verify with pro-cli doctor --json.
+I am logged in to ChatGPT in Chrome. Set up pro-cli auth from my existing Chrome profile. Store only scoped ChatGPT/OpenAI auth under ~/.pro-cli, do not print raw cookies or tokens, then verify with pro-cli doctor --json.
 ```
 
 This is the lowest-friction path. It uses a browser profile that already has your ChatGPT session, so it also exposes that profile over Chrome DevTools Protocol while the CDP Chrome window is open.
@@ -57,7 +57,7 @@ pro-cli auth capture --cdp http://127.0.0.1:9222 --json
 pro-cli doctor --json
 ```
 
-This is the normal long-running path. It creates `~/.pro/chrome-profile`, keeps ChatGPT auth separate from your personal Chrome profile, and limits what the open debugging port can see.
+This is the normal long-running path. It creates `~/.pro-cli/chrome-profile`, keeps ChatGPT auth separate from your personal Chrome profile, and limits what the open debugging port can see.
 
 Port `9222` is the default. If you use another port, pass the same `--cdp` or `--port` to `doctor`, `run`, and `submit`. `wait` uses the CDP value stored on the job.
 
@@ -65,7 +65,9 @@ Port `9222` is the default. If you use another port, pass the same `--cdp` or `-
 
 Keep the ChatGPT Chrome window open while jobs run. `pro-cli` sends requests from that logged-in tab over Chrome DevTools Protocol, so it gets the same cookies, page session, frontend headers, and streaming/resume behavior as ChatGPT in the browser.
 
-Use the dedicated `~/.pro/chrome-profile` window for normal operation. A personal Chrome profile can work, but the debugging port exposes that profile while it is open. The dedicated profile limits scope to ChatGPT.
+Async jobs run through a local `pro-cli` daemon. `submit`, `wait`, and `cancel` start or restart it when needed, so agents do not need to manage a background process. The daemon processes `~/.pro-cli/jobs.sqlite`; those commands reach it through a localhost control endpoint stored under `/tmp`.
+
+Use the dedicated `~/.pro-cli/chrome-profile` window for normal operation. A personal Chrome profile can work, but the debugging port exposes that profile while it is open. The dedicated profile limits scope to ChatGPT.
 
 If Chrome closes, run `pro-cli auth command --json` again. If ChatGPT logs out, sign in and rerun:
 
@@ -84,7 +86,7 @@ pro-cli doctor --json
 Put this in a user-level or project-level agent instructions file:
 
 ```md
-Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli submit @prompt.md --reasoning high --json`, then `pro-cli wait <job-id> --json` and `pro-cli result <job-id> --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro`.
+Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli submit @prompt.md --reasoning high --json`, then `pro-cli wait <job-id> --json` and `pro-cli result <job-id> --json`. `submit` and `wait` manage the local daemon. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
 ```
 
 ## Commands
@@ -119,11 +121,21 @@ pro-cli cancel <job-id> --json
 pro-cli jobs --limit 20 --json
 ```
 
+Daemon:
+
+```sh
+pro-cli daemon status --json
+pro-cli daemon restart --json
+pro-cli daemon stop --json
+```
+
 Blocking run:
 
 ```sh
 pro-cli run @prompt.md --model auto --reasoning high --json
 ```
+
+`run` executes without creating durable job state. Use `submit` when you need a job id that later `wait`, `result`, `cancel`, or `jobs` can inspect.
 
 ## Conversations
 
@@ -184,8 +196,12 @@ Unsupported request flags fail loudly. Errors include `code`, `message`, and `su
 
 ## Safety
 
-`pro-cli` uses a browser session you control. The recommended setup opens a dedicated Chrome profile, captures scoped ChatGPT/OpenAI cookies plus the page session token, and stores them under `~/.pro`.
+`pro-cli` uses a browser session you control. The recommended setup opens a dedicated Chrome profile, captures scoped ChatGPT/OpenAI cookies plus the page session token, and stores them under `~/.pro-cli`.
 
-Treat `~/.pro` like SSH keys or browser session data. Do not commit it, paste it, sync it, or share it.
+Treat `~/.pro-cli` like SSH keys or browser session data. Do not commit it, paste it, sync it, or share it.
+
+The daemon control file lives under `/tmp/pro-cli-*` with a local bearer token and private file mode. It points commands at the daemon; it does not contain ChatGPT cookies or session tokens.
+
+If an older default `~/.pro` directory exists and `~/.pro-cli` does not, the first non-help command moves it to `~/.pro-cli` and rewrites stored paths that pointed inside the old directory. Set `PRO_CLI_HOME` to use a different location.
 
 Normal setup, doctor, job, and status output redacts raw cookies and tokens. Files use private permissions where supported: `0600` for files and `0700` for directories. Requests go to `https://chatgpt.com`.
