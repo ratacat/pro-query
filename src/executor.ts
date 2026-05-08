@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { RuntimePaths } from "./config";
 import { EXIT, ProError, toProError } from "./errors";
-import { JobStore, redactJob, type JobRecord, type JobStatus } from "./jobs";
+import { JobStore, redactJob, type JobRecord, type JobStatus, type LimitsObservation } from "./jobs";
 import { runChatGptJob } from "./transport";
 
 export async function executeClaimedJob(
@@ -9,6 +9,7 @@ export async function executeClaimedJob(
   job: JobRecord,
   paths: RuntimePaths,
 ): Promise<Record<string, unknown>> {
+  const observations: LimitsObservation[] = [];
   try {
     const result = await runChatGptJob(job, {
       sessionTokenPath: paths.sessionTokenPath,
@@ -16,7 +17,9 @@ export async function executeClaimedJob(
       timeoutMs: numberFromOption(job.options.timeoutMs),
       retries: numberFromOption(job.options.retries),
       retryDelayMs: numberFromOption(job.options.retryDelayMs),
+      onLimits: (entries) => observations.push(...entries),
     });
+    if (observations.length > 0) store.recordLimits(observations, job.id);
     const completed = store.markSucceeded(job.id, result);
     return { job: redactJob(completed), result };
   } catch (error) {
@@ -32,6 +35,7 @@ export async function executeEphemeralJob(
   job: JobRecord,
   paths: RuntimePaths,
 ): Promise<Record<string, unknown>> {
+  const observations: LimitsObservation[] = [];
   try {
     const result = await runChatGptJob(job, {
       sessionTokenPath: paths.sessionTokenPath,
@@ -39,7 +43,9 @@ export async function executeEphemeralJob(
       timeoutMs: numberFromOption(job.options.timeoutMs),
       retries: numberFromOption(job.options.retries),
       retryDelayMs: numberFromOption(job.options.retryDelayMs),
+      onLimits: (entries) => observations.push(...entries),
     });
+    if (observations.length > 0) await persistLimits(paths.dbPath, observations, job.id);
     return {
       job: redactJob({ ...job, status: "succeeded", result, updatedAt: new Date().toISOString() }),
       result,
@@ -55,6 +61,19 @@ export async function executeEphemeralJob(
       }),
       error: proError.toPayload(),
     };
+  }
+}
+
+async function persistLimits(
+  dbPath: string,
+  observations: LimitsObservation[],
+  jobId: string,
+): Promise<void> {
+  const store = await JobStore.open(dbPath);
+  try {
+    store.recordLimits(observations, jobId);
+  } finally {
+    store.close();
   }
 }
 

@@ -26,6 +26,20 @@ export interface JobRecord {
   updatedAt: string;
 }
 
+export interface LimitsObservation {
+  feature_name: string;
+  remaining: number;
+  reset_after: string | null;
+}
+
+export interface LimitsSnapshot {
+  featureName: string;
+  remaining: number;
+  resetAfter: string | null;
+  observedAt: string;
+  jobId: string | null;
+}
+
 interface JobRow {
   id: string;
   status: JobStatus;
@@ -59,6 +73,16 @@ export class JobStore {
         error_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      )
+    `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS limits_observations (
+        feature_name TEXT NOT NULL,
+        remaining REAL NOT NULL,
+        reset_after TEXT,
+        observed_at TEXT NOT NULL,
+        job_id TEXT,
+        PRIMARY KEY (feature_name, observed_at)
       )
     `);
     return new JobStore(db);
@@ -163,6 +187,51 @@ export class JobStore {
       error: JSON.stringify(error.toPayload()),
     });
     return this.get(id);
+  }
+
+  recordLimits(observations: LimitsObservation[], jobId: string | null): void {
+    if (observations.length === 0) return;
+    const observedAt = new Date().toISOString();
+    const insert = this.db.query(
+      `INSERT OR REPLACE INTO limits_observations
+        (feature_name, remaining, reset_after, observed_at, job_id)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const observation of observations) {
+      insert.run(
+        observation.feature_name,
+        observation.remaining,
+        observation.reset_after ?? null,
+        observedAt,
+        jobId,
+      );
+    }
+  }
+
+  latestLimits(): LimitsSnapshot[] {
+    const rows = this.db
+      .query(
+        `SELECT feature_name, remaining, reset_after, observed_at, job_id
+         FROM limits_observations
+         WHERE (feature_name, observed_at) IN (
+           SELECT feature_name, MAX(observed_at) FROM limits_observations GROUP BY feature_name
+         )
+         ORDER BY feature_name ASC`,
+      )
+      .all() as Array<{
+        feature_name: string;
+        remaining: number;
+        reset_after: string | null;
+        observed_at: string;
+        job_id: string | null;
+      }>;
+    return rows.map((row) => ({
+      featureName: row.feature_name,
+      remaining: row.remaining,
+      resetAfter: row.reset_after,
+      observedAt: row.observed_at,
+      jobId: row.job_id,
+    }));
   }
 
   close(): void {

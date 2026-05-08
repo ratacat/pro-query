@@ -6,7 +6,7 @@
 
 Agent native CLI for querying ChatGPT Pro and Deep Research through your own logged-in web session, managed from your terminal.
 
-`pro-cli` gives coding agents a JSON-first command surface for the ChatGPT web account you already use: Pro models, thinking levels, Deep Research-style capabilities when available to your account, async jobs, and recoverable results.
+`pro-cli` gives coding agents a JSON-first command surface for the ChatGPT web account you already use: Pro models, thinking levels, Deep Research-style capabilities when available to your account, structured JSON outputs with schema validation, calibrated probability scoring, async jobs, and recoverable results.
 
 `pro-cli` is built for legal ChatGPT subscribers using their own session. It does not bypass authentication, subscriptions, rate limits, access controls, or account restrictions.
 
@@ -154,6 +154,65 @@ pro-cli ask @prompt.md --reasoning extended --json
 
 JSON responses that include full Pro text also include `agentInstruction` and `resultStats`. Agents should treat `data.result` as the primary deliverable. Results under 6000 characters should usually be relayed in full; longer results may be condensed with care for the original prose, structure, and voice.
 
+Probability and plan:
+
+```sh
+pro-cli odds "Will X happen?" --context @evidence.md
+pro-cli limits --json
+```
+
+## Structured Outputs
+
+`pro-cli` wraps your prompt with strict JSON instructions, parses the model's reply, validates it, and retries on failure. Use this when an agent or script needs a typed result instead of prose.
+
+Quick, with a free-form format hint:
+
+```sh
+pro-cli ask "Extract the people from this article" \
+  --format '{people: [{name: string, role: string}]}'
+```
+
+Rigorous, with a JSON Schema (validates the parsed value):
+
+```sh
+pro-cli ask "Find 3 fictional spies" \
+  --schema @people.schema.json --json
+```
+
+The CLI strips fenced ```` ```json ```` blocks (with a balanced-bracket fallback that handles braces inside strings), parses, and validates the root type plus top-level `required` fields. On parse or validation failure, it retries up to `--schema-retries <n>` times (default 1), feeding the previous failed response and the failure reason back to the model.
+
+With `--json`, the envelope includes `parsed`, `raw`, and `attempts`. Without `--json`, the parsed JSON is pretty-printed to stdout, ready for `jq` or another tool. The same flags work on the durable job path:
+
+```sh
+pro-cli job create @prompt.md --wait --schema @file.json --json
+```
+
+## Probability Scoring
+
+`pro-cli odds` is a yes/no probability assessor. It wraps your question with strict integer-only output instructions and returns a single integer 0–100 representing P(YES). Useful for prediction-market scoring, threshold gates in agent pipelines, or any place a calibrated number beats prose.
+
+```sh
+pro-cli odds "Will the deploy ship by Friday?" --context @evidence.md
+# → 78
+
+pro-cli odds "..." --samples 5 --aggregate median --json
+```
+
+Bare integer to stdout by default for shell-friendly consumption (`prob=$(pro-cli odds "...")`). `--samples N` runs N calls and aggregates (`mean` default; `median`, `trimmed-mean` available). `--allow-fifty` permits 50; the default forbids it to force a directional commitment, retrying up to `--parse-retries` if the model returns 50. `--json` returns the full envelope with per-sample attempts and job ids.
+
+## Plan and Observed Limits
+
+```sh
+pro-cli limits --json
+```
+
+Returns:
+
+- Plan facts from `accounts/check`: `plan_type`, `subscription_plan`, `expires_at`, `renews_at`, `billing_period`, `features`.
+- Per-feature counters (e.g. `deep_research`, `odyssey`) captured from the ChatGPT stream metadata of recent `ask`/`odds`/`job` calls, with `observed_at` timestamps.
+
+ChatGPT does not expose a standalone limits endpoint, so counters refresh whenever you make a real Pro call. General Pro chat throttling is adaptive and not exposed by any endpoint we found.
+
 ## Conversations
 
 New `ask` and `job create` requests default to temporary ChatGPT conversations. Use `--save` when the turn should be written to ChatGPT history.
@@ -209,6 +268,19 @@ pro-cli models --json
 --timeout <ms>
 --retries <0..5>
 --retry-delay <ms>
+--schema @schema.json | --schema "<inline JSON Schema>"
+--format "<inline format hint>"
+--schema-retries <0..5>
+```
+
+Probability (`odds`) only:
+
+```sh
+--context @evidence.md | --context "inline context"
+--samples <1..25>
+--aggregate mean|median|trimmed-mean
+--parse-retries <0..5>
+--allow-fifty
 ```
 
 Job wait controls:

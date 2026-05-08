@@ -40,6 +40,67 @@ POST /backend-api/sentinel/chat-requirements/finalize
 
 The conversation endpoint is the primary submission endpoint. The prepare and sentinel endpoints produce request validation state. The resume endpoint supports long streams and reconnects.
 
+### Account / Plan / PII Endpoints
+
+Probed via CDP page evaluation (May 8, 2026):
+
+```txt
+GET  /backend-api/accounts/check/v4-2023-04-27   200  account + plan + features (no remaining counters)
+GET  /backend-api/me                             200  email, name, phone, MFA flag, picture (PII)
+GET  /public-api/conversation_limit              200  {"message_cap":0.0,...} (zeroed, not useful)
+```
+
+`accounts/check/v4-2023-04-27` is the canonical place for plan facts. The shape includes:
+
+```json
+{
+  "accounts": {
+    "<account-uuid>": {
+      "account": { "plan_type": "pro", "structure": "personal", ... },
+      "entitlement": {
+        "subscription_plan": "chatgptpro",
+        "has_active_subscription": true,
+        "expires_at": "...",
+        "renews_at": "...",
+        "billing_period": "monthly"
+      },
+      "features": ["gpt5_pro", "o3_pro", "canvas", ...]
+    }
+  }
+}
+```
+
+`/backend-api/me` returns user PII — handle with care. `pro-cli` should not log or persist its body.
+
+### Endpoints That Do Not Exist
+
+Probed and confirmed 404/405 (do not re-probe):
+
+```txt
+/backend-api/conversation_limits_progress   404
+/backend-api/conversation_limit             404
+/backend-api/conversation_limits            404
+/public-api/conversation_limit/v2           404
+/backend-api/me/usage                       404
+/backend-api/me/limits                      404
+/backend-api/me/quota                       404
+/backend-api/me/feature_limits              404
+/backend-api/usage                          404
+/backend-api/usage_metrics                  404
+/backend-api/billing/usage                  404
+/backend-api/billing/subscription           404
+/backend-api/subscription                   404
+/backend-api/feature_limits                 404
+/backend-api/limits                         404
+/backend-api/limits_progress                404
+/backend-api/rate_limits                    404
+/backend-api/conversation_meta              404
+/backend-api/account/check                  404
+/backend-api/accounts/check                 405
+```
+
+**Conclusion: there is no standalone "remaining calls" endpoint.** Per-feature counters only appear inside the SSE stream as `conversation_detail_metadata.limits_progress` events on real conversation turns (see Limits section below). Pro general chat throttling is adaptive; no published cap exists.
+
 ## Request Shape
 
 `pro-cli` currently sends a body shaped like:
@@ -205,7 +266,9 @@ These fields can prove which model actually handled the turn. This is useful bec
 }
 ```
 
-This can support a `pro-cli limits --json` command or enrich `doctor`.
+Wired into `pro-cli limits` as a stream-side capture: `transport.ts` extracts `limits_progress` from `conversation_detail_metadata` events and persists snapshots to the local SQLite. `pro-cli limits` returns plan info from `accounts/check` plus the most recent observed counters.
+
+Observed `feature_name` values so far: `deep_research`, `odyssey`. These are specialty-feature quotas, not general chat caps. Free-tier features (gpt5, etc.) do not appear here on Pro.
 
 ### Tools and Search
 

@@ -9,13 +9,16 @@ import { DEFAULT_MODEL, DEFAULT_REASONING, REASONING_LEVELS, isReasoningLevel } 
 import { EXIT, ProError, toProError } from "./errors";
 import { buildEphemeralJob, executeEphemeralJob } from "./executor";
 import { JobStore, redactJob } from "./jobs";
+import { fetchAccountSummary } from "./limits";
 import { listModels } from "./models";
+import { runOdds, type AggregateMethod } from "./odds";
+import { loadSchema, runStructured } from "./structured";
 import type { CliIO } from "./output";
 import { writeError, writeSuccess } from "./output";
 import { updateProCli } from "./update";
 
 const HELP_TEXT =
-  "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no job DB\njob create --wait: durable blocking query\njob wait: waits until done unless timeout flags are set\nupdate: fast-forward install\nUse --json for agents.";
+  "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no job DB\nodds: probability of YES, integer 0-100\nlimits: plan + observed counters\njob create --wait: durable blocking query\njob wait: waits until done\nupdate: fast-forward install\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -92,15 +95,125 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         writeSuccess(io, mode, await listModels({ sessionTokenPath: paths.sessionTokenPath }));
         return EXIT.success;
       }
+      case "limits": {
+        const cdp = flagString(parsed.flags, "cdp");
+        const port = flagString(parsed.flags, "port");
+        const cdpBase = cdp || port ? defaultCdpBase(port, cdp) : undefined;
+        const account = await fetchAccountSummary(cdpBase);
+        const store = await JobStore.open(paths.dbPath);
+        try {
+          const observed = store.latestLimits();
+          writeSuccess(io, mode, {
+            account,
+            observedLimits: observed,
+            note:
+              observed.length === 0
+                ? "No limits observed yet. Make a pro-cli ask/odds/job call; per-feature counters arrive in the stream metadata."
+                : "Per-feature counters captured from the most recent stream that included them. Pro chat throttling is adaptive and not exposed here.",
+          });
+          return EXIT.success;
+        } finally {
+          store.close();
+        }
+      }
       case "ask": {
         const prompt = await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd);
+        const askModel = resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL);
+        const askReasoning = resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING);
+        const askOptions = await collectRequestOptions(parsed.flags, io.cwd, ASK_REQUEST_FLAGS, "ask");
+        const schemaRaw = flagString(parsed.flags, "schema");
+        const formatHint = flagString(parsed.flags, "format");
+        if (schemaRaw && formatHint) {
+          throw invalidArgs("Use --schema or --format, not both.", ["Pick one structured-output flag."]);
+        }
+        if (schemaRaw || formatHint) {
+          const schema = schemaRaw ? await loadSchema(schemaRaw, io.cwd) : undefined;
+          const schemaRetries = parseIntegerFlag(parsed.flags, "schema-retries", 1, 0, 5);
+          const structured = await runStructured(prompt, {
+            schema,
+            formatHint,
+            retries: schemaRetries,
+            runner: async (wrappedPrompt) => {
+              const job = buildEphemeralJob({
+                prompt: wrappedPrompt,
+                model: askModel,
+                reasoning: askReasoning,
+                options: askOptions,
+              });
+              const outcome = await executeEphemeralJob(job, paths);
+              if (isRecord(outcome.error)) {
+                throw new ProError(
+                  typeof outcome.error.code === "string" ? outcome.error.code : "STRUCTURED_RUNNER_FAILED",
+                  typeof outcome.error.message === "string" ? outcome.error.message : "ChatGPT request failed.",
+                  { exitCode: EXIT.upstream },
+                );
+              }
+              return typeof outcome.result === "string" ? outcome.result : "";
+            },
+          });
+          if (flagBoolean(parsed.flags, "json")) {
+            writeSuccess(io, { json: true }, {
+              parsed: structured.parsed,
+              raw: structured.raw,
+              attempts: structured.attempts,
+            });
+          } else {
+            io.stdout(`${JSON.stringify(structured.parsed, null, 2)}\n`);
+          }
+          return EXIT.success;
+        }
         const job = buildEphemeralJob({
           prompt,
-          model: resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL),
-          reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING),
-          options: await collectRequestOptions(parsed.flags, io.cwd, ASK_REQUEST_FLAGS, "ask"),
+          model: askModel,
+          reasoning: askReasoning,
+          options: askOptions,
         });
         writeSuccess(io, mode, await executeEphemeralJob(job, paths));
+        return EXIT.success;
+      }
+      case "odds": {
+        const question = await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd);
+        const samples = parseIntegerFlag(parsed.flags, "samples", 1, 1, 25);
+        const parseRetries = parseIntegerFlag(parsed.flags, "parse-retries", 2, 0, 5);
+        const aggregate = resolveAggregate(flagString(parsed.flags, "aggregate") ?? "mean");
+        const allowFifty = flagBoolean(parsed.flags, "allow-fifty");
+        const contextRaw = flagString(parsed.flags, "context");
+        const context = contextRaw ? await readMaybeAtFile(contextRaw, io.cwd) : undefined;
+        const baseRequestOptions = await collectRequestOptions(
+          parsed.flags,
+          io.cwd,
+          ODDS_REQUEST_FLAGS,
+          "odds",
+        );
+        const result = await runOdds({
+          question,
+          context,
+          model: resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL),
+          reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING),
+          samples,
+          aggregate,
+          allowFifty,
+          parseRetries,
+          baseRequestOptions,
+          paths,
+        });
+        if (flagBoolean(parsed.flags, "json")) {
+          writeSuccess(io, { json: true }, {
+            probability: result.probability,
+            probabilityRaw: result.probabilityRaw,
+            samples: result.samples,
+            aggregate: result.aggregate,
+            parseFailures: result.parseFailures,
+            rejectedFifties: result.rejectedFifties,
+            allowFifty: result.allowFifty,
+            model: result.model,
+            reasoning: result.reasoning,
+            jobIds: result.jobIds,
+            attempts: result.attempts,
+          });
+        } else {
+          io.stdout(`${result.probability}\n`);
+        }
         return EXIT.success;
       }
       case "job": {
@@ -116,14 +229,63 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
               "Remove --no-start or remove --wait.",
             ]);
           }
+          const jobSchemaRaw = flagString(parsed.flags, "schema");
+          const jobFormatHint = flagString(parsed.flags, "format");
+          if (jobSchemaRaw && jobFormatHint) {
+            throw invalidArgs("Use --schema or --format, not both.", ["Pick one structured-output flag."]);
+          }
+          if ((jobSchemaRaw || jobFormatHint) && !waitRequested) {
+            throw invalidArgs("Structured output requires --wait.", [
+              "Add --wait so retries can read the result, or run pro-cli ask --schema.",
+            ]);
+          }
+          const userPrompt = await promptFromArgs(rest, io.cwd);
           const input = {
-            prompt: await promptFromArgs(rest, io.cwd),
+            prompt: userPrompt,
             model: resolveModel(flagString(parsed.flags, "model") ?? config.defaultModel ?? DEFAULT_MODEL),
             reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? DEFAULT_REASONING),
             options: await collectRequestOptions(parsed.flags, io.cwd, JOB_CREATE_FLAGS, "job create"),
           };
           if (!flagBoolean(parsed.flags, "no-start")) {
             const daemon = await ensureDaemonRunning(paths, io);
+            if (waitRequested && (jobSchemaRaw || jobFormatHint)) {
+              const schema = jobSchemaRaw ? await loadSchema(jobSchemaRaw, io.cwd) : undefined;
+              const schemaRetries = parseIntegerFlag(parsed.flags, "schema-retries", 1, 0, 5);
+              const waitOptions = parseWaitOptions(parsed.flags);
+              const jobIds: string[] = [];
+              const structured = await runStructured(userPrompt, {
+                schema,
+                formatHint: jobFormatHint,
+                retries: schemaRetries,
+                runner: async (wrappedPrompt) => {
+                  const created = await daemon.client.createJob({ ...input, prompt: wrappedPrompt });
+                  const jobId = jobIdFromPayload(created);
+                  jobIds.push(jobId);
+                  const waited = await daemon.client.wait(
+                    jobId,
+                    waitOptions.timeoutMs,
+                    waitOptions.pollMs,
+                    waitOptions.softTimeout,
+                  );
+                  if (!isRecord(waited.job) || waited.job.status !== "succeeded") {
+                    throw new ProError("STRUCTURED_RUNNER_FAILED", "Job did not reach succeeded status.", {
+                      exitCode: EXIT.upstream,
+                      details: { jobId, waited },
+                    });
+                  }
+                  const fetched = await daemon.client.result(jobId);
+                  return typeof fetched.result === "string" ? fetched.result : "";
+                },
+              });
+              writeSuccess(io, mode, {
+                parsed: structured.parsed,
+                raw: structured.raw,
+                attempts: structured.attempts,
+                jobIds,
+                daemon: { started: daemon.started, status: daemon.status },
+              });
+              return EXIT.success;
+            }
             const created = await daemon.client.createJob(input);
             if (waitRequested) {
               const waitOptions = parseWaitOptions(parsed.flags);
@@ -322,6 +484,8 @@ function commandList(): string[] {
     "auth capture",
     "models",
     "ask",
+    "odds",
+    "limits",
     "job create",
     "job status",
     "job wait",
@@ -507,6 +671,9 @@ const ASK_REQUEST_FLAGS = new Set([
   "parent",
   "cdp",
   "port",
+  "schema",
+  "format",
+  "schema-retries",
 ]);
 
 const JOB_CREATE_FLAGS = new Set([
@@ -517,6 +684,38 @@ const JOB_CREATE_FLAGS = new Set([
   "soft-timeout",
   "poll-ms",
 ]);
+
+const ODDS_REQUEST_FLAGS = new Set([
+  "json",
+  "no-json",
+  "model",
+  "reasoning",
+  "verbosity",
+  "reasoning-summary",
+  "tool-choice",
+  "parallel-tools",
+  "timeout",
+  "retries",
+  "retry-delay",
+  "store",
+  "save",
+  "temporary",
+  "no-temporary",
+  "conversation",
+  "parent",
+  "cdp",
+  "port",
+  "context",
+  "samples",
+  "aggregate",
+  "parse-retries",
+  "allow-fifty",
+]);
+
+function resolveAggregate(value: string): AggregateMethod {
+  if (value === "mean" || value === "median" || value === "trimmed-mean") return value;
+  throw invalidArgs("Invalid --aggregate.", ["Allowed values: mean, median, trimmed-mean."]);
+}
 
 function setConversationOptions(
   options: Record<string, unknown>,

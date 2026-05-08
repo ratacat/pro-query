@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { evaluateInCdpPage } from "./cdp";
 import { DEFAULT_MODEL, isReasoningLevel } from "./defaults";
 import { EXIT, ProError } from "./errors";
-import type { JobRecord } from "./jobs";
+import type { JobRecord, LimitsObservation } from "./jobs";
 import { isTokenFresh, loadSessionToken } from "./session-token";
 
 const CHATGPT_CONVERSATION_ENDPOINT = "https://chatgpt.com/backend-api/f/conversation";
@@ -17,6 +17,7 @@ export interface TransportOptions {
   timeoutMs?: number;
   retries?: number;
   retryDelayMs?: number;
+  onLimits?: (observations: LimitsObservation[]) => void;
 }
 
 export async function runChatGptJob(job: JobRecord, options: TransportOptions): Promise<string> {
@@ -108,7 +109,7 @@ async function postChatGptJob(
       });
     }
 
-    return readResponseText(browserResult.body);
+    return readResponseText(browserResult.body, options.onLimits);
   } catch (error) {
     if (error instanceof ProError) throw error;
     throw networkError(error);
@@ -866,7 +867,10 @@ function buildConversationPrompt(job: JobRecord): string {
   return `${instructions.trim()}\n\n${prompt}`;
 }
 
-function readResponseText(raw: string): string {
+function readResponseText(
+  raw: string,
+  onLimits?: (observations: LimitsObservation[]) => void,
+): string {
   let buffer = raw;
   let completedText: string | null = null;
   let completed = false;
@@ -881,6 +885,10 @@ function readResponseText(raw: string): string {
     if (parsed.text !== null) {
       completedText = mergeStreamText(completedText, parsed.text, parsed.append);
     }
+    if (onLimits) {
+      const observations = extractLimitsProgress(event);
+      if (observations.length > 0) onLimits(observations);
+    }
     completed = completed || parsed.completed;
     boundary = buffer.indexOf("\n\n");
   }
@@ -890,6 +898,10 @@ function readResponseText(raw: string): string {
     const parsed = readConversationEvent(event, state);
     if (parsed.text !== null) {
       completedText = mergeStreamText(completedText, parsed.text, parsed.append);
+    }
+    if (onLimits) {
+      const observations = extractLimitsProgress(event);
+      if (observations.length > 0) onLimits(observations);
     }
     completed = completed || parsed.completed;
   }
@@ -924,6 +936,41 @@ function mergeStreamText(current: string | null, next: string, append: boolean):
   }
   if (current && current.length > next.length && current.endsWith(next)) return current;
   return next;
+}
+
+export function extractLimitsProgress(event: unknown): LimitsObservation[] {
+  if (!isRecord(event)) return [];
+  const candidates: unknown[] = [];
+  if (event.type === "conversation_detail_metadata") candidates.push(event);
+  const value = event.v;
+  if (isRecord(value) && value.type === "conversation_detail_metadata") candidates.push(value);
+  if (isRecord(value) && Array.isArray((value as { limits_progress?: unknown }).limits_progress)) {
+    candidates.push(value);
+  }
+  if (Array.isArray((event as { limits_progress?: unknown }).limits_progress)) candidates.push(event);
+
+  const observations: LimitsObservation[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) continue;
+    const progress = (candidate as { limits_progress?: unknown }).limits_progress;
+    if (!Array.isArray(progress)) continue;
+    for (const entry of progress) {
+      if (!isRecord(entry)) continue;
+      const featureName = entry.feature_name;
+      const remaining = entry.remaining;
+      const resetAfter = entry.reset_after;
+      if (typeof featureName !== "string" || typeof remaining !== "number") continue;
+      if (seen.has(featureName)) continue;
+      seen.add(featureName);
+      observations.push({
+        feature_name: featureName,
+        remaining,
+        reset_after: typeof resetAfter === "string" ? resetAfter : null,
+      });
+    }
+  }
+  return observations;
 }
 
 function readConversationEvent(event: unknown, state: ResponseParseState): {

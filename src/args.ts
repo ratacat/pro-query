@@ -17,6 +17,7 @@ const BOOLEAN_FLAGS = new Set([
   "wait",
   "help",
   "version",
+  "allow-fifty",
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
