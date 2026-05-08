@@ -215,6 +215,28 @@ describe("ChatGPT transport", () => {
     });
   });
 
+  test("deduplicates repeated append snapshots after unrelated stream events", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: [
+            'data: {"v":{"message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":[""]},"status":"in_progress"}}}',
+            'data: {"p":"/message/content/parts/0","o":"append","v":"OK"}',
+            'data: {"type":"metadata","v":{"ignored":true}}',
+            'data: {"v":"OK"}',
+            'data: {"type":"message_stream_complete"}',
+            "",
+          ].join("\n\n"),
+        }) as T);
+
+      const result = await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+
+      expect(result).toBe("OK");
+    });
+  });
+
   test("maps non-OK upstream responses to structured errors", async () => {
     await withTokenFile(async (sessionTokenPath) => {
       const pageEvaluator = (async <T>(): Promise<T> =>

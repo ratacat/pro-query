@@ -66,7 +66,7 @@ export function buildEphemeralJob(input: {
 }): JobRecord {
   const now = new Date().toISOString();
   return {
-    id: `run_${randomUUID()}`,
+    id: `ask_${randomUUID()}`,
     status: "running",
     prompt: input.prompt,
     model: input.model,
@@ -92,7 +92,7 @@ export async function waitForTerminalJob(
     if (timeoutMs > 0 && Date.now() - start >= timeoutMs) {
       throw new ProError("WAIT_TIMEOUT", `Job ${jobId} is still ${job.status}.`, {
         exitCode: EXIT.timeout,
-        suggestions: ["Run pro-cli status <job-id> later.", "Use pro-cli cancel <job-id> if this job is stale."],
+        suggestions: ["Run pro-cli job status <job-id> later.", "Use pro-cli job cancel <job-id> if this job is stale."],
       });
     }
     await sleep(pollMs);

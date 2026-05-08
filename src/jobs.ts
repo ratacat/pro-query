@@ -6,7 +6,7 @@ import { ensurePrivateDir } from "./config";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
-export interface SubmitJobInput {
+export interface CreateJobInput {
   prompt: string;
   model: string;
   reasoning: string;
@@ -64,7 +64,7 @@ export class JobStore {
     return new JobStore(db);
   }
 
-  create(input: SubmitJobInput): JobRecord {
+  create(input: CreateJobInput): JobRecord {
     const now = new Date().toISOString();
     const job: JobRecord = {
       id: `job_${randomUUID()}`,
@@ -104,7 +104,7 @@ export class JobStore {
     if (!row) {
       throw new ProError("JOB_NOT_FOUND", `No job exists for ${id}.`, {
         exitCode: EXIT.notFound,
-        suggestions: ["Run pro-cli jobs --json to list recent jobs."],
+        suggestions: ["Run pro-cli job list --json to list recent jobs."],
       });
     }
     return rowToJob(row);

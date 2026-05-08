@@ -15,7 +15,7 @@ import { writeError, writeSuccess } from "./output";
 const REASONING_LEVELS = ["auto", "low", "medium", "high", "extended", "min", "standard", "max"];
 
 const HELP_TEXT =
-  "pro-cli: ChatGPT Pro CLI\nsetup, auth command, auth capture, auth status, models, run, submit, wait, result, jobs, daemon, doctor\nUse --json for agents.";
+  "pro-cli: ChatGPT Pro CLI\nask: direct blocking query, no daemon or job DB\njob create/wait: async jobs, auto-start local daemon\nUse --json for agents.";
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseArgs(argv);
@@ -87,43 +87,106 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         writeSuccess(io, mode, await listModels({ sessionTokenPath: paths.sessionTokenPath }));
         return EXIT.success;
       }
-      case "submit": {
-        const input = {
-          prompt: await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd),
-          model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
-          reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
-          options: await collectSubmitOptions(parsed.flags, io.cwd),
-        };
-        if (!flagBoolean(parsed.flags, "no-start")) {
-          const daemon = await ensureDaemonRunning(paths, io);
-          writeSuccess(io, mode, {
-            ...(await daemon.client.submit(input)),
-            daemon: { started: daemon.started, status: daemon.status },
-          });
-          return EXIT.success;
-        }
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          const job = store.create(input);
-          writeSuccess(io, mode, { job, daemon: { started: false } });
-          return EXIT.success;
-        } finally {
-          store.close();
-        }
-      }
-      case "run": {
+      case "ask": {
         const prompt = await promptFromArgs([subcommand, ...rest].filter(Boolean), io.cwd);
         const job = buildEphemeralJob({
           prompt,
           model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
           reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
-          options: await collectSubmitOptions(parsed.flags, io.cwd),
+          options: await collectRequestOptions(parsed.flags, io.cwd),
         });
         writeSuccess(io, mode, await executeEphemeralJob(job, paths));
         return EXIT.success;
       }
+      case "job": {
+        if (subcommand === "create") {
+          const input = {
+            prompt: await promptFromArgs(rest, io.cwd),
+            model: flagString(parsed.flags, "model") ?? config.defaultModel ?? "auto",
+            reasoning: resolveReasoning(flagString(parsed.flags, "reasoning") ?? config.defaultReasoning ?? "auto"),
+            options: await collectRequestOptions(parsed.flags, io.cwd),
+          };
+          if (!flagBoolean(parsed.flags, "no-start")) {
+            const daemon = await ensureDaemonRunning(paths, io);
+            writeSuccess(io, mode, {
+              ...(await daemon.client.createJob(input)),
+              daemon: { started: daemon.started, status: daemon.status },
+            });
+            return EXIT.success;
+          }
+          const store = await JobStore.open(paths.dbPath);
+          try {
+            const job = store.create(input);
+            writeSuccess(io, mode, { job, daemon: { started: false } });
+            return EXIT.success;
+          } finally {
+            store.close();
+          }
+        }
+        if (subcommand === "status") {
+          const jobId = rest[0];
+          if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli job status <job-id>."]);
+          const store = await JobStore.open(paths.dbPath);
+          try {
+            writeSuccess(io, mode, { job: redactJob(store.get(jobId)) });
+            return EXIT.success;
+          } finally {
+            store.close();
+          }
+        }
+        if (subcommand === "result") {
+          const jobId = rest[0];
+          if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli job result <job-id>."]);
+          const store = await JobStore.open(paths.dbPath);
+          try {
+            const job = store.get(jobId);
+            if (job.status !== "succeeded") {
+              throw new ProError("JOB_NOT_READY", `Job ${jobId} is ${job.status}.`, {
+                exitCode: EXIT.notFound,
+                suggestions: ["Run pro-cli job wait <job-id> or pro-cli job status <job-id>."],
+              });
+            }
+            writeSuccess(io, mode, { jobId, result: job.result });
+            return EXIT.success;
+          } finally {
+            store.close();
+          }
+        }
+        if (subcommand === "wait") {
+          const jobId = rest[0];
+          if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli job wait <job-id>."]);
+          const waitTimeoutMs = parseIntegerFlag(parsed.flags, "wait-timeout", 0, 0, 24 * 60 * 60_000);
+          const pollMs = parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000);
+          const daemon = await ensureDaemonRunning(paths, io);
+          writeSuccess(io, mode, await daemon.client.wait(jobId, waitTimeoutMs, pollMs));
+          return EXIT.success;
+        }
+        if (subcommand === "cancel") {
+          const jobId = rest[0];
+          if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli job cancel <job-id>."]);
+          const daemon = await ensureDaemonRunning(paths, io);
+          writeSuccess(io, mode, await daemon.client.cancel(jobId));
+          return EXIT.success;
+        }
+        if (subcommand === "list") {
+          const limit = Number(flagString(parsed.flags, "limit") ?? "20");
+          if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+            throw invalidArgs("Invalid --limit.", ["Use --limit between 1 and 200."]);
+          }
+          const store = await JobStore.open(paths.dbPath);
+          try {
+            writeSuccess(io, mode, { jobs: store.list(limit) });
+            return EXIT.success;
+          } finally {
+            store.close();
+          }
+        }
+        throw invalidArgs("Unknown job command.", [
+          "Use pro-cli job create, job status, job wait, job result, job cancel, or job list.",
+        ]);
+      }
       case "daemon": {
-        if (subcommand === "run") {
+        if (subcommand === "serve") {
           await runDaemonServer(paths, {
             port: parseOptionalIntegerFlag(parsed.flags, "port", 0, 65_535),
             pollMs: parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000),
@@ -148,64 +211,6 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         throw invalidArgs("Unknown daemon command.", [
           "Use pro-cli daemon start, pro-cli daemon status, pro-cli daemon stop, or pro-cli daemon restart.",
         ]);
-      }
-      case "status": {
-        const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli status <job-id>."]);
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          writeSuccess(io, mode, { job: redactJob(store.get(jobId)) });
-          return EXIT.success;
-        } finally {
-          store.close();
-        }
-      }
-      case "result": {
-        const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli result <job-id>."]);
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          const job = store.get(jobId);
-          if (job.status !== "succeeded") {
-            throw new ProError("JOB_NOT_READY", `Job ${jobId} is ${job.status}.`, {
-              exitCode: EXIT.notFound,
-              suggestions: ["Run pro-cli wait <job-id> or pro-cli status <job-id>."],
-            });
-          }
-          writeSuccess(io, mode, { jobId, result: job.result });
-          return EXIT.success;
-        } finally {
-          store.close();
-        }
-      }
-      case "wait": {
-        const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli wait <job-id>."]);
-        const waitTimeoutMs = parseIntegerFlag(parsed.flags, "wait-timeout", 0, 0, 24 * 60 * 60_000);
-        const pollMs = parseIntegerFlag(parsed.flags, "poll-ms", 500, 25, 60_000);
-        const daemon = await ensureDaemonRunning(paths, io);
-        writeSuccess(io, mode, await daemon.client.wait(jobId, waitTimeoutMs, pollMs));
-        return EXIT.success;
-      }
-      case "cancel": {
-        const jobId = subcommand;
-        if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli cancel <job-id>."]);
-        const daemon = await ensureDaemonRunning(paths, io);
-        writeSuccess(io, mode, await daemon.client.cancel(jobId));
-        return EXIT.success;
-      }
-      case "jobs": {
-        const limit = Number(flagString(parsed.flags, "limit") ?? "20");
-        if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
-          throw invalidArgs("Invalid --limit.", ["Use --limit between 1 and 200."]);
-        }
-        const store = await JobStore.open(paths.dbPath);
-        try {
-          writeSuccess(io, mode, { jobs: store.list(limit) });
-          return EXIT.success;
-        } finally {
-          store.close();
-        }
       }
       case "config": {
         if (subcommand === "get") {
@@ -270,13 +275,13 @@ function commandList(): string[] {
     "auth status",
     "auth capture",
     "models",
-    "submit",
-    "run",
-    "status",
-    "result",
-    "wait",
-    "cancel",
-    "jobs",
+    "ask",
+    "job create",
+    "job status",
+    "job wait",
+    "job result",
+    "job cancel",
+    "job list",
     "daemon start",
     "daemon status",
     "daemon stop",
@@ -292,8 +297,8 @@ function buildDoctorNext(
 ): Record<string, string> {
   if (authReady && browserStatus === "present") {
     return {
-      command: `pro-cli run "Reply with OK only." --cdp ${cdpBase} --json`,
-      reason: "Stored auth and the live CDP ChatGPT page are ready; run a smoke query.",
+      command: `pro-cli ask "Reply with OK only." --cdp ${cdpBase} --json`,
+      reason: "Stored auth and the live CDP ChatGPT page are ready; send a smoke query.",
     };
   }
   if (authReady && browserStatus === "logged_out") {
@@ -342,7 +347,7 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
       {
         id: "smoke-test",
         status: ready ? "todo" : "blocked",
-        command: `pro-cli run "Reply with OK only." --cdp ${authCommand.cdp} --reasoning low --json`,
+        command: `pro-cli ask "Reply with OK only." --cdp ${authCommand.cdp} --reasoning low --json`,
         note: "Verifies the live ChatGPT tab, captured auth, CDP port, and backend request path.",
       },
     ],
@@ -388,18 +393,18 @@ function safetySummary(): Record<string, unknown> {
 
 async function promptFromArgs(args: string[], cwd: string): Promise<string> {
   const prompt = args.join(" ").trim();
-  if (!prompt) throw invalidArgs("Missing prompt.", ["Use pro-cli submit \"prompt\" or pro-cli submit @prompt.md."]);
+  if (!prompt) throw invalidArgs("Missing prompt.", ["Use pro-cli ask \"prompt\" or pro-cli job create @prompt.md."]);
   if (prompt.startsWith("@") && !prompt.includes(" ")) {
     return readFile(new URL(prompt.slice(1), `file://${cwd}/`), "utf8");
   }
   return prompt;
 }
 
-async function collectSubmitOptions(
+async function collectRequestOptions(
   flags: Map<string, string | boolean | string[]>,
   cwd: string,
 ): Promise<Record<string, unknown>> {
-  rejectUnsupportedFlags(flags, SUBMIT_FLAGS, "submit/run");
+  rejectUnsupportedFlags(flags, REQUEST_FLAGS, "ask/job create");
   const options: Record<string, unknown> = {};
   setStringOption(options, "verbosity", flags, "verbosity", ["low", "medium", "high"]);
   setStringOption(options, "reasoningSummary", flags, "reasoning-summary", [
@@ -432,7 +437,7 @@ async function collectSubmitOptions(
   return options;
 }
 
-const SUBMIT_FLAGS = new Set([
+const REQUEST_FLAGS = new Set([
   "json",
   "no-json",
   "model",

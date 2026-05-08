@@ -63,7 +63,7 @@ export function renderText(payload: unknown): string {
     const id = typeof payload.job.id === "string" ? payload.job.id : "unknown";
     const status = typeof payload.job.status === "string" ? payload.job.status : "unknown";
     const resultHint =
-      status === "succeeded" ? `\nresult: pro-cli result ${id}` : `\nwait: pro-cli wait ${id}`;
+      status === "succeeded" ? `\nresult: pro-cli job result ${id}` : `\nwait: pro-cli job wait ${id}`;
     return `job ${id} ${status}${resultHint}`;
   }
   return JSON.stringify(payload);

@@ -50,7 +50,9 @@ describe("robot-mode CLI", () => {
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
-    expect(result.stdout.length).toBeLessThan(160);
+    expect(result.stdout).toContain("ask: direct blocking query");
+    expect(result.stdout).toContain("job create/wait: async jobs");
+    expect(result.stdout.length).toBeLessThan(220);
     expect(result.stderr).toBe("");
   });
 
@@ -59,7 +61,9 @@ describe("robot-mode CLI", () => {
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("pro-cli: ChatGPT Pro CLI");
-    expect(result.stdout.length).toBeLessThan(160);
+    expect(result.stdout).toContain("ask: direct blocking query");
+    expect(result.stdout).toContain("job create/wait: async jobs");
+    expect(result.stdout.length).toBeLessThan(220);
     expect(result.stderr).toBe("");
   });
 
@@ -69,7 +73,8 @@ describe("robot-mode CLI", () => {
     expect(result.code).toBe(0);
     const payload = JSON.parse(result.stdout);
     expect(payload.ok).toBe(true);
-    expect(payload.data.text).toContain("auth capture");
+    expect(payload.data.text).toContain("ask: direct blocking query");
+    expect(payload.data.commands).toContain("auth capture");
   });
 
   test("prints version for install verification", async () => {
@@ -189,28 +194,28 @@ describe("robot-mode CLI", () => {
 
   test("creates durable async jobs with redacted prompt preview", async () => {
     await withHome(async (home) => {
-      const submit = await run(["submit", "hello", "from", "agent", "--no-start", "--json"], {
+      const createdResult = await run(["job", "create", "hello", "from", "agent", "--no-start", "--json"], {
         tty: true,
         home,
       });
 
-      expect(submit.code).toBe(0);
-      const created = JSON.parse(submit.stdout);
+      expect(createdResult.code).toBe(0);
+      const created = JSON.parse(createdResult.stdout);
       const jobId = created.data.job.id;
       expect(created.data.job.status).toBe("queued");
       expect(created.data.daemon.started).toBe(false);
       expect(created.data.job.prompt).toBe("");
       expect(created.data.job.promptPreview).toBe("hello from agent");
 
-      const status = await run(["status", jobId, "--json"], { tty: true, home });
+      const status = await run(["job", "status", jobId, "--json"], { tty: true, home });
       expect(status.code).toBe(0);
       expect(JSON.parse(status.stdout).data.job.id).toBe(jobId);
     });
   });
 
-  test("run reports missing session token without durable job storage", async () => {
+  test("ask reports missing session token without durable job storage", async () => {
     await withHome(async (home) => {
-      const result = await run(["run", "hello", "--json"], { tty: true, home });
+      const result = await run(["ask", "hello", "--json"], { tty: true, home });
 
       expect(result.code).toBe(0);
       const payload = JSON.parse(result.stdout);
@@ -232,7 +237,7 @@ describe("robot-mode CLI", () => {
     });
   });
 
-  test("run executes without durable job storage and returns the full result", async () => {
+  test("ask executes without durable job storage and returns the full result", async () => {
     await withHome(async (home) => {
       await mkdir(join(home, "tokens"), { recursive: true });
       await writeFile(
@@ -254,7 +259,7 @@ describe("robot-mode CLI", () => {
 
       const result = await run(
         [
-          "run",
+          "ask",
           "hello",
           "--json",
           "--reasoning",
@@ -286,7 +291,7 @@ describe("robot-mode CLI", () => {
     });
   });
 
-  test("run can opt into saved and continued conversations", async () => {
+  test("ask can opt into saved and continued conversations", async () => {
     await withHome(async (home) => {
       await writeSessionToken(home);
       let expression = "";
@@ -296,7 +301,7 @@ describe("robot-mode CLI", () => {
 
       const result = await run(
         [
-          "run",
+          "ask",
           "continue this",
           "--json",
           "--save",
@@ -322,7 +327,7 @@ describe("robot-mode CLI", () => {
 
   test("continuing a conversation requires conversation and parent ids together", async () => {
     await withHome(async (home) => {
-      const result = await run(["submit", "hello", "--conversation", "conv_123", "--json"], {
+      const result = await run(["job", "create", "hello", "--conversation", "conv_123", "--json"], {
         tty: true,
         home,
       });
@@ -334,7 +339,7 @@ describe("robot-mode CLI", () => {
     });
   });
 
-  test("run prints plain text result for TTY users", async () => {
+  test("ask prints plain text result for TTY users", async () => {
     await withHome(async (home) => {
       await mkdir(join(home, "tokens"), { recursive: true });
       await writeFile(
@@ -350,7 +355,7 @@ describe("robot-mode CLI", () => {
       );
       installFakeCdp(conversationStream("OK"));
 
-      const result = await run(["run", "hello"], { tty: true, home });
+      const result = await run(["ask", "hello"], { tty: true, home });
 
       expect(result.code).toBe(0);
       expect(result.stdout).toBe("OK\n");
@@ -359,7 +364,7 @@ describe("robot-mode CLI", () => {
 
   test("rejects unsupported request flags instead of silently ignoring them", async () => {
     await withHome(async (home) => {
-      const result = await run(["submit", "hello", "--temperature", "0.2", "--json"], {
+      const result = await run(["job", "create", "hello", "--temperature", "0.2", "--json"], {
         tty: true,
         home,
       });

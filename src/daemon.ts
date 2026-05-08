@@ -8,7 +8,7 @@ import type { RuntimePaths } from "./config";
 import { ensurePrivateDir, writePrivateFile } from "./config";
 import { EXIT, ProError, type ErrorPayload, type ExitCode, toProError } from "./errors";
 import { executeClaimedJob, waitForTerminalJob } from "./executor";
-import { JobStore, redactJob, type SubmitJobInput } from "./jobs";
+import { JobStore, redactJob, type CreateJobInput } from "./jobs";
 import type { CliIO } from "./output";
 
 const DEFAULT_DAEMON_START_TIMEOUT_MS = 5_000;
@@ -57,7 +57,7 @@ export class DaemonClient {
     return this.request("GET", "/health");
   }
 
-  async submit(input: SubmitJobInput): Promise<Record<string, unknown>> {
+  async createJob(input: CreateJobInput): Promise<Record<string, unknown>> {
     return this.request("POST", "/jobs", input);
   }
 
@@ -362,7 +362,7 @@ async function startDaemonProcess(paths: RuntimePaths, io: CliIO): Promise<void>
   for (const [key, value] of Object.entries(io.env)) {
     if (value !== undefined) env[key] = value;
   }
-  const child = spawn(process.execPath, [cliPath, "daemon", "run", "--json"], {
+  const child = spawn(process.execPath, [cliPath, "daemon", "serve", "--json"], {
     cwd: io.cwd,
     detached: true,
     env,
@@ -387,7 +387,7 @@ async function routeDaemonRequest(
     return { state: "stopping" };
   }
   if (request.method === "POST" && url.pathname === "/jobs") {
-    const input = submitInputFromPayload(await readJsonBody(request));
+    const input = createJobInputFromPayload(await readJsonBody(request));
     const job = store.create(input);
     queueMicrotask(() => void control.pumpQueue());
     return { job, daemon: { accepted: true } };
@@ -411,7 +411,7 @@ async function routeDaemonRequest(
     if (job.status !== "succeeded") {
       throw new ProError("JOB_NOT_READY", `Job ${jobId} is ${job.status}.`, {
         exitCode: EXIT.notFound,
-        suggestions: ["Run pro-cli wait <job-id> or pro-cli status <job-id>."],
+        suggestions: ["Run pro-cli job wait <job-id> or pro-cli job status <job-id>."],
       });
     }
     return { jobId, result: job.result };
@@ -481,7 +481,7 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   return parsed as Record<string, unknown>;
 }
 
-function submitInputFromPayload(payload: Record<string, unknown>): SubmitJobInput {
+function createJobInputFromPayload(payload: Record<string, unknown>): CreateJobInput {
   if (
     typeof payload.prompt !== "string" ||
     typeof payload.model !== "string" ||

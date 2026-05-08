@@ -59,13 +59,13 @@ pro-cli doctor --json
 
 This is the normal long-running path. It creates `~/.pro-cli/chrome-profile`, keeps ChatGPT auth separate from your personal Chrome profile, and limits what the open debugging port can see.
 
-Port `9222` is the default. If you use another port, pass the same `--cdp` or `--port` to `doctor`, `run`, and `submit`. `wait` uses the CDP value stored on the job.
+Port `9222` is the default. If you use another port, pass the same `--cdp` or `--port` to `doctor`, `ask`, and `job create`. `job wait` uses the CDP value stored on the job.
 
 ## Runtime Model
 
 Keep the ChatGPT Chrome window open while jobs run. `pro-cli` sends requests from that logged-in tab over Chrome DevTools Protocol, so it gets the same cookies, page session, frontend headers, and streaming/resume behavior as ChatGPT in the browser.
 
-Async jobs run through a local `pro-cli` daemon. `submit`, `wait`, and `cancel` start or restart it when needed, so agents do not need to manage a background process. The daemon processes `~/.pro-cli/jobs.sqlite`; those commands reach it through a localhost control endpoint stored under `/tmp`.
+Async jobs run through a local `pro-cli` daemon. `job create`, `job wait`, and `job cancel` start or restart it when needed, so agents do not need to manage a background process. The daemon processes `~/.pro-cli/jobs.sqlite`; those commands reach it through a localhost control endpoint stored under `/tmp`.
 
 Use the dedicated `~/.pro-cli/chrome-profile` window for normal operation. A personal Chrome profile can work, but the debugging port exposes that profile while it is open. The dedicated profile limits scope to ChatGPT.
 
@@ -86,7 +86,7 @@ pro-cli doctor --json
 Put this in a user-level or project-level agent instructions file:
 
 ```md
-Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli submit @prompt.md --reasoning high --json`, then `pro-cli wait <job-id> --json` and `pro-cli result <job-id> --json`. `submit` and `wait` manage the local daemon. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
+Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, extended thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --reasoning high --json`, then `pro-cli job wait <job-id> --json` and `pro-cli job result <job-id> --json`. `job create` and `job wait` manage the local daemon. For a direct blocking query, use `pro-cli ask @prompt.md --json`. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
 ```
 
 ## Commands
@@ -114,11 +114,11 @@ pro-cli config set reasoning high --json
 Async jobs:
 
 ```sh
-pro-cli submit @prompt.md --model auto --reasoning high --json
-pro-cli wait <job-id> --wait-timeout 60000 --json
-pro-cli result <job-id> --json
-pro-cli cancel <job-id> --json
-pro-cli jobs --limit 20 --json
+pro-cli job create @prompt.md --model auto --reasoning high --json
+pro-cli job wait <job-id> --wait-timeout 60000 --json
+pro-cli job result <job-id> --json
+pro-cli job cancel <job-id> --json
+pro-cli job list --limit 20 --json
 ```
 
 Daemon:
@@ -129,22 +129,22 @@ pro-cli daemon restart --json
 pro-cli daemon stop --json
 ```
 
-Blocking run:
+Direct ask:
 
 ```sh
-pro-cli run @prompt.md --model auto --reasoning high --json
+pro-cli ask @prompt.md --model auto --reasoning high --json
 ```
 
-`run` executes without creating durable job state. Use `submit` when you need a job id that later `wait`, `result`, `cancel`, or `jobs` can inspect.
+`ask` executes without creating durable job state. Use `job create` when you need a job id that later `job wait`, `job result`, `job cancel`, or `job list` can inspect.
 
 ## Conversations
 
-New `run` and `submit` requests default to temporary ChatGPT conversations. Use `--save` when the turn should be written to ChatGPT history.
+New `ask` and `job create` requests default to temporary ChatGPT conversations. Use `--save` when the turn should be written to ChatGPT history.
 
 Continuing a conversation defaults to saved mode and requires both ids from the ChatGPT conversation:
 
 ```sh
-pro-cli run "follow up" --save --conversation <conversation-id> --parent <message-id> --json
+pro-cli ask "follow up" --save --conversation <conversation-id> --parent <message-id> --json
 ```
 
 ## Thinking Modes

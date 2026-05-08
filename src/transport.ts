@@ -90,7 +90,7 @@ async function postChatGptJob(
         suggestions: [
           "Sign in to ChatGPT in the Chrome window from pro-cli auth command.",
           "Run pro-cli auth capture --cdp http://127.0.0.1:9222 --json after login.",
-          "Retry pro-cli run with the same --cdp value.",
+          "Retry pro-cli ask with the same --cdp value.",
         ],
         details: { status: browserResult.status },
       });
@@ -919,7 +919,10 @@ interface ResponseParseState {
 }
 
 function mergeStreamText(current: string | null, next: string, append: boolean): string {
-  if (append) return `${current ?? ""}${next}`;
+  if (append) {
+    if (current && (current === next || current.endsWith(next))) return current;
+    return `${current ?? ""}${next}`;
+  }
   if (current && current.length > next.length && current.endsWith(next)) return current;
   return next;
 }
