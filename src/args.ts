@@ -18,6 +18,8 @@ const BOOLEAN_FLAGS = new Set([
   "help",
   "version",
   "allow-fifty",
+  "no-launch",
+  "no-backup",
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {

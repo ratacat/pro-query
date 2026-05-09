@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
 import { flagBoolean, flagString, parseArgs } from "./args";
-import { captureAuth, defaultCdpBase, getAuthStatus, getBrowserSessionStatus } from "./auth";
+import { captureAuth, defaultCdpBase, getAuthStatus, getBrowserSessionStatus, resetAuthProfile } from "./auth";
 import { loadConfig, migrateLegacyDefaultHome, resolvePaths, saveConfig } from "./config";
 import { ensureDaemonRunning, getDaemonStatus, runDaemonServer, stopDaemon } from "./daemon";
 import { DEFAULT_MODEL, DEFAULT_REASONING, REASONING_LEVELS, isReasoningLevel } from "./defaults";
@@ -89,7 +89,21 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           writeSuccess(io, mode, status);
           return EXIT.success;
         }
-        throw invalidArgs("Unknown auth command.", ["Use pro-cli auth status or pro-cli auth capture."]);
+        if (subcommand === "reset") {
+          const port = flagString(parsed.flags, "port") ?? "9222";
+          const result = await resetAuthProfile({
+            home: paths.home,
+            port,
+            noBackup: flagBoolean(parsed.flags, "no-backup"),
+            noLaunch: flagBoolean(parsed.flags, "no-launch"),
+            keepBackups: parseIntegerFlag(parsed.flags, "keep-backups", 5, 0, 100),
+          });
+          writeSuccess(io, mode, result);
+          return EXIT.success;
+        }
+        throw invalidArgs("Unknown auth command.", [
+          "Use pro-cli auth status, pro-cli auth command, pro-cli auth capture, or pro-cli auth reset.",
+        ]);
       }
       case "models": {
         writeSuccess(io, mode, await listModels({ sessionTokenPath: paths.sessionTokenPath }));
@@ -482,6 +496,7 @@ function commandList(): string[] {
     "auth command",
     "auth status",
     "auth capture",
+    "auth reset",
     "models",
     "ask",
     "odds",

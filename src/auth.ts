@@ -1,4 +1,6 @@
-import { access } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { access, readdir, rename, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { EXIT, ProError } from "./errors";
 import { evaluateInCdpPage, getCookiesFromCdp } from "./cdp";
 import {
@@ -318,4 +320,169 @@ async function readTokenStatus(path: string): Promise<"missing" | "present" | "e
 
 async function readAccountIdPresent(path: string): Promise<boolean> {
   return (await tokenStatusFields(path)).accountIdPresent;
+}
+
+export interface ResetProfileOptions {
+  home: string;
+  port: string;
+  noBackup?: boolean;
+  noLaunch?: boolean;
+  keepBackups?: number;
+}
+
+export interface ResetProfileResult {
+  profileDir: string;
+  killedPids: number[];
+  removed: { mode: "backup" | "delete" | "missing"; from: string; to?: string };
+  prunedBackups: string[];
+  launched: { command: string } | null;
+  cdp: string;
+  next: { command: string; reason: string };
+}
+
+export async function resetAuthProfile(options: ResetProfileOptions): Promise<ResetProfileResult> {
+  const profileDir = join(options.home, "chrome-profile");
+  if (!profileDir.startsWith(options.home + "/") && profileDir !== options.home) {
+    throw new ProError("RESET_PATH_UNSAFE", "Refusing to reset a profile outside the pro-cli home.", {
+      exitCode: EXIT.invalidArgs,
+      details: { profileDir, home: options.home },
+    });
+  }
+
+  const killedPids = killChromeForProfile(profileDir);
+  if (killedPids.length > 0) {
+    await sleepMs(1500);
+    for (const pid of killedPids) {
+      try {
+        process.kill(pid, 0);
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  }
+
+  const removed = await removeProfileDir(profileDir, !options.noBackup);
+  const keepBackups = Math.max(0, options.keepBackups ?? 5);
+  const prunedBackups = await pruneOldBackups(options.home, keepBackups);
+
+  let launched: ResetProfileResult["launched"] = null;
+  if (!options.noLaunch) {
+    const command = buildOpenChromeCommand(profileDir, options.port);
+    const child = spawn("/bin/sh", ["-c", command], { detached: true, stdio: "ignore" });
+    child.unref();
+    launched = { command };
+  }
+
+  const cdp = `http://127.0.0.1:${options.port}`;
+  return {
+    profileDir,
+    killedPids,
+    removed,
+    prunedBackups,
+    launched,
+    cdp,
+    next: {
+      command: `pro-cli auth capture --cdp ${cdp} --json`,
+      reason: launched
+        ? "Profile reset and Chrome relaunched. Sign in to ChatGPT in the new window, then run the capture command."
+        : "Profile reset. Open a new Chrome with pro-cli auth command, sign in, then run the capture command.",
+    },
+  };
+}
+
+function killChromeForProfile(profileDir: string): number[] {
+  const ps = spawnSync("ps", ["axo", "pid=,command="], { encoding: "utf8" });
+  if (ps.status !== 0) return [];
+  const needle = `--user-data-dir=${profileDir}`;
+  const pids: number[] = [];
+  for (const rawLine of ps.stdout.split("\n")) {
+    const line = rawLine.trim();
+    if (!line.includes(needle)) continue;
+    const match = line.match(/^(\d+)\s/);
+    if (!match) continue;
+    pids.push(Number.parseInt(match[1], 10));
+  }
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // process may have exited between ps and kill
+    }
+  }
+  return pids;
+}
+
+async function removeProfileDir(
+  dir: string,
+  backup: boolean,
+): Promise<ResetProfileResult["removed"]> {
+  try {
+    await stat(dir);
+  } catch {
+    return { mode: "missing", from: dir };
+  }
+  if (backup) {
+    const ts = backupTimestamp();
+    let target = `${dir}.backup-${ts}`;
+    let suffix = 1;
+    while (await pathExists(target)) {
+      target = `${dir}.backup-${ts}-${suffix}`;
+      suffix += 1;
+    }
+    await rename(dir, target);
+    return { mode: "backup", from: dir, to: target };
+  }
+  await rm(dir, { recursive: true, force: true });
+  return { mode: "delete", from: dir };
+}
+
+async function pruneOldBackups(home: string, keep: number): Promise<string[]> {
+  const entries = await readdir(home).catch(() => [] as string[]);
+  const backups = entries
+    .filter((name) => /^chrome-profile\.backup-/.test(name))
+    .sort()
+    .reverse();
+  const toRemove = backups.slice(keep);
+  const removed: string[] = [];
+  for (const name of toRemove) {
+    const full = join(home, name);
+    try {
+      await rm(full, { recursive: true, force: true });
+      removed.push(full);
+    } catch {
+      // ignore individual prune failures
+    }
+  }
+  return removed;
+}
+
+function buildOpenChromeCommand(profileDir: string, port: string): string {
+  const url = "https://chatgpt.com/";
+  if (process.platform === "darwin") {
+    return `open -na "Google Chrome" --args --user-data-dir='${profileDir}' --remote-debugging-port=${port} ${url}`;
+  }
+  if (process.platform === "win32") {
+    return `start "" chrome.exe --user-data-dir="${profileDir}" --remote-debugging-port=${port} ${url}`;
+  }
+  return `google-chrome --user-data-dir='${profileDir}' --remote-debugging-port=${port} ${url}`;
+}
+
+function backupTimestamp(): string {
+  const d = new Date();
+  const pad = (n: number, w = 2) => n.toString().padStart(w, "0");
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
