@@ -28,6 +28,7 @@ Prefer reproducible local observations from the authenticated browser session. K
 When probing ChatGPT with test queries, use temporary conversations by default. Only create, save, or continue non-temporary conversations when the behavior under test specifically requires saved history, continuation, or sidebar-visible conversation state.
 
 See `docs/chatgpt-chrome-cdp-cookies.md` for the validated local Chrome/CDP cookie export flow.
+See `docs/chatgpt-431-cookie-bloat.md` when ChatGPT returns `431` or the CDP page resolves to `chrome-error://chromewebdata/`.
 
 ## CLI Requirements
 

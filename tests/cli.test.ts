@@ -476,6 +476,26 @@ describe("robot-mode CLI", () => {
     });
   });
 
+  test("ask recovers once from ChatGPT cookie bloat", async () => {
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      let deleted = 0;
+      let navigated = false;
+      installCookieBloatRecoveryCdp(() => {
+        deleted += 1;
+      }, () => {
+        navigated = true;
+      });
+
+      const result = await run(["ask", "hello", "--json", "--timeout", "10"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout).data.result).toBe("OK");
+      expect(deleted).toBe(1);
+      expect(navigated).toBe(true);
+    });
+  });
+
   test("rejects unsupported request flags instead of silently ignoring them", async () => {
     await withHome(async (home) => {
       const result = await run(["job", "create", "hello", "--temperature", "0.2", "--json"], {
@@ -597,6 +617,79 @@ function installFakeCdpValue(value: unknown, onExpression?: (expression: string)
           result: { value },
         },
       };
+      queueMicrotask(() =>
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(response) })),
+      );
+    }
+
+    close(): void {
+      this.dispatchEvent(new Event("close"));
+    }
+  }
+
+  globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+}
+
+function installCookieBloatRecoveryCdp(onDelete: () => void, onNavigate: () => void): void {
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const target = String(url);
+    if (target.endsWith("/json")) {
+      return Response.json([
+        {
+          type: "page",
+          url: "https://chatgpt.com/",
+          webSocketDebuggerUrl: "ws://fake-chatgpt-page",
+        },
+      ]);
+    }
+    if (target.endsWith("/json/version")) {
+      return Response.json({ webSocketDebuggerUrl: "ws://fake-browser" });
+    }
+    return new Response("unexpected fetch", { status: 500 });
+  }) as unknown as typeof fetch;
+
+  let runtimeEvaluations = 0;
+  class FakeWebSocket extends EventTarget {
+    constructor(_url: string) {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+
+    send(raw: string): void {
+      const message = JSON.parse(raw) as { id: number; method: string };
+      let response: Record<string, unknown> = { id: message.id, result: {} };
+      if (message.method === "Runtime.evaluate") {
+        runtimeEvaluations += 1;
+        response = {
+          id: message.id,
+          result: {
+            result: {
+              value:
+                runtimeEvaluations === 1
+                  ? {
+                      ok: false,
+                      status: 0,
+                      code: "CHATGPT_PAGE_MISSING",
+                      body: "Expected https://chatgpt.com, got chrome-error://chromewebdata/",
+                    }
+                  : { ok: true, status: 200, body: conversationStream("OK") },
+            },
+          },
+        };
+      }
+      if (message.method === "Network.getCookies") {
+        response = {
+          id: message.id,
+          result: {
+            cookies: [
+              { name: "__Secure-next-auth.session-token", value: "x", domain: "chatgpt.com", path: "/" },
+              { name: "conv_key_abc", value: "x", domain: "chatgpt.com", path: "/" },
+            ],
+          },
+        };
+      }
+      if (message.method === "Network.deleteCookies") onDelete();
+      if (message.method === "Page.navigate") onNavigate();
       queueMicrotask(() =>
         this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(response) })),
       );

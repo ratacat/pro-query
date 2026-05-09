@@ -47,6 +47,7 @@ export function sanitizeCookies(cookies: BrowserCookie[]): BrowserCookie[] {
   const deduped = new Map<string, BrowserCookie>();
   for (const cookie of cookies) {
     if (!cookie.name || cookie.value === undefined) continue;
+    if (isVolatileCookieName(cookie.name)) continue;
     const domain = stripLeadingDot(cookie.domain || "chatgpt.com");
     const path = cookie.path || "/";
     deduped.set(`${cookie.name}|${domain}|${path}`, {
@@ -61,6 +62,11 @@ export function sanitizeCookies(cookies: BrowserCookie[]): BrowserCookie[] {
     });
   }
   return [...deduped.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function isVolatileCookieName(name: string): boolean {
+  // Per-conversation stream keys accumulate quickly and can push ChatGPT over HTTP header limits.
+  return name.startsWith("conv_key_");
 }
 
 export function cookieSummary(cookies: BrowserCookie[]): {

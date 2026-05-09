@@ -1,4 +1,5 @@
 import { EXIT, ProError } from "./errors";
+import { isVolatileCookieName } from "./cookies";
 
 interface JsonRpcResponse<T> {
   id?: number;
@@ -27,17 +28,60 @@ export async function getCookiesFromCdp(
   const wsUrl = await resolveCdpWebSocketUrl(cdpBase);
   const client = await CdpClient.connect(wsUrl, timeoutMs);
   try {
-    try {
-      const response = await client.send<{ cookies: CdpCookie[] }>("Network.getCookies", { urls });
-      return filterCookiesForUrls(response.cookies ?? [], urls);
-    } catch (error) {
-      if (!isMissingCdpMethod(error)) throw error;
-      const response = await client.send<{ cookies: CdpCookie[] }>("Storage.getCookies");
-      return filterCookiesForUrls(response.cookies ?? [], urls);
-    }
+    return await readCookiesForUrls(client, urls);
   } finally {
     client.close();
   }
+}
+
+export interface CookiePruneResult {
+  checked: number;
+  deleted: number;
+  names: string[];
+}
+
+export async function pruneVolatileCookiesFromCdp(
+  cdpBase: string,
+  urls: string[],
+  timeoutMs = 10_000,
+): Promise<CookiePruneResult> {
+  const wsUrl = await resolveCdpWebSocketUrl(cdpBase);
+  const client = await CdpClient.connect(wsUrl, timeoutMs);
+  try {
+    const cookies = await readCookiesForUrls(client, urls);
+    const volatileCookies = cookies.filter((cookie) => isVolatileCookieName(cookie.name));
+    for (const cookie of volatileCookies) {
+      await client.send<unknown>("Network.deleteCookies", {
+        name: cookie.name,
+        domain: cookie.domain,
+        path: cookie.path || "/",
+      });
+    }
+    return {
+      checked: cookies.length,
+      deleted: volatileCookies.length,
+      names: [...new Set(volatileCookies.map((cookie) => cookie.name))].sort(),
+    };
+  } finally {
+    client.close();
+  }
+}
+
+export interface CookieBloatRecoveryResult extends CookiePruneResult {
+  navigated: boolean;
+}
+
+export async function recoverCookieBloatInCdp(
+  cdpBase: string,
+  urls: string[],
+  timeoutMs = 10_000,
+): Promise<CookieBloatRecoveryResult> {
+  const pruned = await pruneVolatileCookiesFromCdp(cdpBase, urls, timeoutMs);
+  if (pruned.deleted === 0) return { ...pruned, navigated: false };
+
+  await navigateCdpPage(cdpBase, "https://chatgpt.com/", timeoutMs);
+  await sleepMs(Math.min(1500, timeoutMs));
+  return { ...pruned, navigated: true };
 }
 
 export async function evaluateInCdpPage<T>(
@@ -111,6 +155,21 @@ export async function callBrowserCdp<T>(
   }
 }
 
+export async function navigateCdpPage(
+  cdpBase: string,
+  url: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const wsUrl = await resolveRequiredPageWebSocketUrl(cdpBase);
+  const client = await CdpClient.connect(wsUrl, timeoutMs);
+  try {
+    await client.send<unknown>("Page.enable");
+    await client.send<unknown>("Page.navigate", { url });
+  } finally {
+    client.close();
+  }
+}
+
 export async function findChatGptTargetId(cdpBase: string): Promise<string | null> {
   const base = cdpBase.replace(/\/$/, "");
   let response: Response;
@@ -163,6 +222,17 @@ function filterCookiesForUrls(cookies: CdpCookie[], urls: string[]): CdpCookie[]
   return cookies.filter((cookie) => urls.some((url) => cookieAppliesToUrl(cookie, url)));
 }
 
+async function readCookiesForUrls(client: CdpClient, urls: string[]): Promise<CdpCookie[]> {
+  try {
+    const response = await client.send<{ cookies: CdpCookie[] }>("Network.getCookies", { urls });
+    return filterCookiesForUrls(response.cookies ?? [], urls);
+  } catch (error) {
+    if (!isMissingCdpMethod(error)) throw error;
+    const response = await client.send<{ cookies: CdpCookie[] }>("Storage.getCookies");
+    return filterCookiesForUrls(response.cookies ?? [], urls);
+  }
+}
+
 function cookieAppliesToUrl(cookie: CdpCookie, url: string): boolean {
   let parsed: URL;
   try {
@@ -185,6 +255,10 @@ function isMissingCdpMethod(error: unknown): boolean {
     error.code === "CDP_COMMAND_FAILED" &&
     error.details?.cdpCode === -32601
   );
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function resolvePageWebSocketUrl(base: string): Promise<string | null> {

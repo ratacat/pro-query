@@ -1,4 +1,5 @@
-import { evaluateInCdpPage } from "./cdp";
+import { evaluateInCdpPage, recoverCookieBloatInCdp } from "./cdp";
+import { chatGptOrigins } from "./cookies";
 import { EXIT, ProError } from "./errors";
 
 const DEFAULT_CDP_BASE = "http://127.0.0.1:9222";
@@ -23,6 +24,7 @@ interface RawFetchResult {
 }
 
 export async function fetchAccountSummary(cdpBase?: string): Promise<AccountSummary> {
+  const resolvedCdpBase = cdpBase ?? DEFAULT_CDP_BASE;
   const expression = `(${async function pageFetch(): Promise<RawFetchResult> {
     if (location.origin !== "https://chatgpt.com") {
       return { ok: false, status: 0, code: "CHATGPT_PAGE_MISSING", body: location.href };
@@ -52,7 +54,13 @@ export async function fetchAccountSummary(cdpBase?: string): Promise<AccountSumm
     return { ok: response.ok, status: response.status, body };
   }})()`;
 
-  const raw = await evaluateInCdpPage<RawFetchResult>(cdpBase ?? DEFAULT_CDP_BASE, expression, 30_000);
+  let raw = await evaluateInCdpPage<RawFetchResult>(resolvedCdpBase, expression, 30_000);
+  if (shouldRecoverCookieBloat(raw)) {
+    const recovered = await recoverCookieBloatInCdp(resolvedCdpBase, chatGptOrigins(), 30_000).catch(() => null);
+    if (recovered?.deleted) {
+      raw = await evaluateInCdpPage<RawFetchResult>(resolvedCdpBase, expression, 30_000);
+    }
+  }
   if (raw.code === "CHATGPT_PAGE_MISSING") {
     throw new ProError("CHATGPT_PAGE_MISSING", "No logged-in ChatGPT page is available over CDP.", {
       exitCode: EXIT.auth,
@@ -93,6 +101,10 @@ export async function fetchAccountSummary(cdpBase?: string): Promise<AccountSumm
     });
   }
   return summarizeAccountResponse(raw.body);
+}
+
+function shouldRecoverCookieBloat(raw: RawFetchResult): boolean {
+  return raw.status === 431 || raw.body.includes("chrome-error://chromewebdata/");
 }
 
 export function summarizeAccountResponse(body: string): AccountSummary {

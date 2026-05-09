@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { evaluateInCdpPage, getCookiesFromCdp } from "../src/cdp";
+import {
+  evaluateInCdpPage,
+  getCookiesFromCdp,
+  pruneVolatileCookiesFromCdp,
+  recoverCookieBloatInCdp,
+} from "../src/cdp";
 
 const originalFetch = globalThis.fetch;
 const originalWebSocket = globalThis.WebSocket;
@@ -50,6 +55,72 @@ describe("CDP helpers", () => {
     await expect(evaluateInCdpPage("http://127.0.0.1:9222", "location.href")).rejects.toThrow(
       "No inspectable page is available",
     );
+  });
+
+  test("prunes volatile conversation cookies from a live CDP profile", async () => {
+    const deleted: Array<Record<string, unknown> | undefined> = [];
+    installFakeCdp({
+      pageTargets: [{ type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://fake-page" }],
+      onCommand(method, params) {
+        if (method === "Network.getCookies") {
+          return {
+            result: {
+              cookies: [
+                cookie("__Secure-next-auth.session-token", "chatgpt.com"),
+                cookie("conv_key_abc", "chatgpt.com"),
+                cookie("conv_key_def", "chatgpt.com"),
+              ],
+            },
+          };
+        }
+        if (method === "Network.deleteCookies") {
+          deleted.push(params);
+          return { result: {} };
+        }
+        return { result: {} };
+      },
+    });
+
+    const result = await pruneVolatileCookiesFromCdp("http://127.0.0.1:9222", ["https://chatgpt.com/"]);
+
+    expect(result.checked).toBe(3);
+    expect(result.deleted).toBe(2);
+    expect(deleted).toEqual([
+      { name: "conv_key_abc", domain: "chatgpt.com", path: "/" },
+      { name: "conv_key_def", domain: "chatgpt.com", path: "/" },
+    ]);
+  });
+
+  test("cookie bloat recovery prunes volatile cookies and reloads ChatGPT", async () => {
+    const methods: string[] = [];
+    installFakeCdp({
+      pageTargets: [{ type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://fake-page" }],
+      onCommand(method) {
+        methods.push(method);
+        if (method === "Network.getCookies") {
+          return {
+            result: {
+              cookies: [
+                cookie("__Secure-next-auth.session-token", "chatgpt.com"),
+                cookie("conv_key_abc", "chatgpt.com"),
+              ],
+            },
+          };
+        }
+        return { result: {} };
+      },
+    });
+
+    const result = await recoverCookieBloatInCdp("http://127.0.0.1:9222", ["https://chatgpt.com/"], 10);
+
+    expect(result.deleted).toBe(1);
+    expect(result.navigated).toBe(true);
+    expect(methods).toEqual([
+      "Network.getCookies",
+      "Network.deleteCookies",
+      "Page.enable",
+      "Page.navigate",
+    ]);
   });
 });
 

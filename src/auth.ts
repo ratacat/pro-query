@@ -3,7 +3,14 @@ import { access, readdir, rename, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { EXIT, ProError } from "./errors";
-import { callBrowserCdp, evaluateInCdpPage, findChatGptTargetId, getCookiesFromCdp } from "./cdp";
+import {
+  callBrowserCdp,
+  evaluateInCdpPage,
+  findChatGptTargetId,
+  getCookiesFromCdp,
+  recoverCookieBloatInCdp,
+  pruneVolatileCookiesFromCdp,
+} from "./cdp";
 import {
   chatGptOrigins,
   cookieSummary,
@@ -88,39 +95,20 @@ export async function getBrowserSessionStatus(
   timeoutMs = 3_000,
 ): Promise<BrowserSessionStatus> {
   try {
-    const result = await evaluateInCdpPage<{
-      status: number;
-      hasAccessToken: boolean;
-      origin: string;
-      code?: "CHATGPT_PAGE_MISSING";
-    }>(
-      cdpBase,
-      `(async () => {
-        if (location.origin !== "https://chatgpt.com") {
-          return {
-            status: 0,
-            hasAccessToken: false,
-            origin: location.origin,
-            code: "CHATGPT_PAGE_MISSING"
-          };
-        }
-        const res = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include", referrerPolicy: "no-referrer" });
-        const json = await res.json().catch(() => null);
-        return {
-          status: res.status,
-          hasAccessToken: typeof json?.accessToken === "string" && json.accessToken.length > 0,
-          origin: location.origin
-        };
-      })()`,
-      timeoutMs,
-    );
+    let result = await evaluateBrowserSession(cdpBase, timeoutMs);
+    if (shouldRecoverCookieBloat(result)) {
+      const recovered = await recoverCookieBloatInCdp(cdpBase, chatGptOrigins(), timeoutMs).catch(() => null);
+      if (recovered?.deleted) {
+        result = await evaluateBrowserSession(cdpBase, timeoutMs);
+      }
+    }
 
     if (result?.code === "CHATGPT_PAGE_MISSING") {
       return {
         status: "page_missing",
         cdpBase,
         httpStatus: result.status,
-        pageOrigin: result.origin,
+        pageOrigin: result.href,
         suggestions: [
           "Open the Chrome command from pro-cli auth command.",
           "Confirm the CDP tab is on https://chatgpt.com/.",
@@ -190,6 +178,55 @@ export async function getBrowserSessionStatus(
   }
 }
 
+async function evaluateBrowserSession(
+  cdpBase: string,
+  timeoutMs: number,
+): Promise<{
+  status: number;
+  hasAccessToken: boolean;
+  origin: string;
+  href: string;
+  code?: "CHATGPT_PAGE_MISSING";
+}> {
+  return evaluateInCdpPage<{
+    status: number;
+    hasAccessToken: boolean;
+    origin: string;
+    href: string;
+    code?: "CHATGPT_PAGE_MISSING";
+  }>(
+    cdpBase,
+    `(async () => {
+      if (location.origin !== "https://chatgpt.com") {
+        return {
+          status: 0,
+          hasAccessToken: false,
+          origin: location.origin,
+          href: location.href,
+          code: "CHATGPT_PAGE_MISSING"
+        };
+      }
+      const res = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include", referrerPolicy: "no-referrer" });
+      const json = await res.json().catch(() => null);
+      return {
+        status: res.status,
+        hasAccessToken: typeof json?.accessToken === "string" && json.accessToken.length > 0,
+        origin: location.origin,
+        href: location.href
+      };
+    })()`,
+    timeoutMs,
+  );
+}
+
+function shouldRecoverCookieBloat(result: {
+  status: number;
+  href?: string;
+  code?: "CHATGPT_PAGE_MISSING";
+}): boolean {
+  return result.status === 431 || result.href?.startsWith("chrome-error://chromewebdata/") === true;
+}
+
 function probeFailedSuggestions(status: number, cdpBase: string): string[] {
   if (status === 431) {
     return [
@@ -227,6 +264,11 @@ export async function captureAuth(options: CaptureOptions): Promise<AuthStatus> 
     });
   }
 
+  await pruneVolatileCookiesFromCdp(
+    options.cdpBase,
+    chatGptOrigins(),
+    options.timeoutMs ?? 10_000,
+  ).catch(() => undefined);
   const cookies = await getCookiesFromCdp(
     options.cdpBase,
     chatGptOrigins(),

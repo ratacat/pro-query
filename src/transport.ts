@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { evaluateInCdpPage } from "./cdp";
+import { evaluateInCdpPage, recoverCookieBloatInCdp } from "./cdp";
+import { chatGptOrigins } from "./cookies";
 import { DEFAULT_MODEL, isReasoningLevel } from "./defaults";
 import { EXIT, ProError } from "./errors";
 import type { JobRecord, LimitsObservation } from "./jobs";
@@ -68,11 +69,22 @@ async function postChatGptJob(
 
   try {
     const evaluate = options.pageEvaluator ?? evaluateInCdpPage;
-    const browserResult = await evaluate<BrowserFetchResult>(
-      options.cdpBase ?? DEFAULT_CDP_BASE,
+    const cdpBase = options.cdpBase ?? DEFAULT_CDP_BASE;
+    let browserResult = await evaluate<BrowserFetchResult>(
+      cdpBase,
       buildBrowserFetchExpression(buildRequestBody(job), session.accountId),
       timeoutMs || 30 * 60_000,
     );
+    if (!options.pageEvaluator && shouldRecoverCookieBloat(browserResult)) {
+      const recovered = await recoverCookieBloatInCdp(cdpBase, chatGptOrigins(), timeoutMs || 10_000).catch(() => null);
+      if (recovered?.deleted) {
+        browserResult = await evaluate<BrowserFetchResult>(
+          cdpBase,
+          buildBrowserFetchExpression(buildRequestBody(job), session.accountId),
+          timeoutMs || 30 * 60_000,
+        );
+      }
+    }
 
     if (browserResult.code === "CHATGPT_PAGE_MISSING") {
       throw new ProError("CHATGPT_PAGE_MISSING", "No logged-in ChatGPT page is available over CDP.", {
@@ -82,7 +94,7 @@ async function postChatGptJob(
           "Confirm the CDP Chrome window is on https://chatgpt.com/ and logged in.",
           "Pass --cdp if Chrome is using a non-default CDP port.",
         ],
-        details: { cdpBase: options.cdpBase ?? DEFAULT_CDP_BASE },
+        details: { cdpBase },
       });
     }
 
@@ -138,6 +150,10 @@ async function postChatGptJob(
     if (error instanceof ProError) throw error;
     throw networkError(error);
   }
+}
+
+function shouldRecoverCookieBloat(result: BrowserFetchResult): boolean {
+  return result.status === 431 || result.body.includes("chrome-error://chromewebdata/");
 }
 
 interface BrowserFetchResult {
