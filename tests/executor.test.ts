@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
 import { ProError } from "../src/errors";
-import { waitForJob, waitForTerminalJob } from "../src/executor";
+import {
+  buildEphemeralJob,
+  waitForJob,
+  waitForTerminalJob,
+  waitTimeoutError,
+} from "../src/executor";
 import { JobStore } from "../src/jobs";
 
 async function withStore<T>(fn: (store: JobStore) => Promise<T>): Promise<T> {
@@ -60,5 +65,246 @@ describe("job waiting", () => {
         expect(proError.details?.timeoutMs).toBe(1);
       }
     });
+  });
+
+  test("waitForJob returns immediately when the job is already succeeded", async () => {
+    await withStore(async (store) => {
+      const created = store.create({
+        prompt: "x",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+      });
+      store.markRunning(created.id);
+      store.markSucceeded(created.id, "done");
+
+      const t0 = Date.now();
+      const outcome = await waitForJob(store, created.id, 5_000, 100);
+      const elapsed = Date.now() - t0;
+
+      expect(outcome.timedOut).toBe(false);
+      expect(outcome.status).toBe("succeeded");
+      expect(outcome.job.result).toBe("done");
+      // Should not have polled — we returned on first check.
+      expect(elapsed).toBeLessThan(80);
+    });
+  });
+
+  test("waitForJob returns immediately when the job is already failed", async () => {
+    await withStore(async (store) => {
+      const created = store.create({
+        prompt: "x",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+      });
+      store.markRunning(created.id);
+      store.markFailed(created.id, new ProError("BOOM", "blew up"));
+
+      const outcome = await waitForJob(store, created.id, 5_000, 100);
+      expect(outcome.timedOut).toBe(false);
+      expect(outcome.status).toBe("failed");
+    });
+  });
+
+  test("waitForJob returns immediately when the job is already cancelled", async () => {
+    await withStore(async (store) => {
+      const created = store.create({
+        prompt: "x",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+      });
+      store.cancel(created.id);
+
+      const outcome = await waitForJob(store, created.id, 5_000, 100);
+      expect(outcome.timedOut).toBe(false);
+      expect(outcome.status).toBe("cancelled");
+    });
+  });
+
+  test("waitForJob actually polls and returns when the job becomes terminal mid-wait", async () => {
+    await withStore(async (store) => {
+      // Regression guard: if the polling loop were broken to never re-fetch
+      // (e.g. early return), the job would still be 'running' when the wait
+      // returns. We explicitly check it picks up the terminal transition.
+      const created = store.create({
+        prompt: "x",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+      });
+      store.markRunning(created.id);
+
+      // Flip to succeeded after ~50ms while waitForJob polls every 20ms.
+      const flipper = setTimeout(() => store.markSucceeded(created.id, "ok"), 50);
+      try {
+        const outcome = await waitForJob(store, created.id, 1_500, 20);
+        expect(outcome.timedOut).toBe(false);
+        expect(outcome.status).toBe("succeeded");
+        expect(outcome.job.result).toBe("ok");
+        // We should have polled at least twice (>= 40ms before pickup).
+        expect(outcome.elapsedMs).toBeGreaterThanOrEqual(40);
+      } finally {
+        clearTimeout(flipper);
+      }
+    });
+  });
+
+  test("waitForJob with timeoutMs=0 means no timeout (terminal state still returns)", async () => {
+    await withStore(async (store) => {
+      const created = store.create({
+        prompt: "x",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+      });
+      store.markRunning(created.id);
+      const flipper = setTimeout(() => store.markSucceeded(created.id, "done"), 30);
+      try {
+        const outcome = await waitForJob(store, created.id, 0, 10);
+        expect(outcome.timedOut).toBe(false);
+        expect(outcome.status).toBe("succeeded");
+      } finally {
+        clearTimeout(flipper);
+      }
+    });
+  });
+
+  test("waitForJob propagates JOB_NOT_FOUND when the id is missing", async () => {
+    await withStore(async (store) => {
+      try {
+        await waitForJob(store, "job_missing", 10, 5);
+        throw new Error("Expected JOB_NOT_FOUND.");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProError);
+        expect((error as ProError).code).toBe("JOB_NOT_FOUND");
+      }
+    });
+  });
+
+  test("waitForTerminalJob returns the unredacted terminal record on success", async () => {
+    await withStore(async (store) => {
+      const created = store.create({
+        prompt: "x",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+      });
+      store.markRunning(created.id);
+      store.markSucceeded(created.id, "result text");
+      const job = await waitForTerminalJob(store, created.id, 1_000, 10);
+      expect(job.status).toBe("succeeded");
+      expect(job.result).toBe("result text");
+      expect(job.id).toBe(created.id);
+    });
+  });
+});
+
+describe("buildEphemeralJob", () => {
+  test("produces a job with status=running and an ask_ id (not job_)", () => {
+    // The id prefix matters: the daemon and store distinguish ask_* from
+    // job_* records. ask_* must never end up in the persistent jobs table.
+    const job = buildEphemeralJob({
+      prompt: "ephemeral prompt",
+      model: "gpt-5-5-pro",
+      reasoning: "extended",
+      options: { timeoutMs: 5000 },
+    });
+    expect(job.id).toMatch(/^ask_[0-9a-f]{8}-/);
+    expect(job.status).toBe("running");
+    expect(job.prompt).toBe("ephemeral prompt");
+    expect(job.model).toBe("gpt-5-5-pro");
+    expect(job.reasoning).toBe("extended");
+    expect(job.options).toEqual({ timeoutMs: 5000 });
+    expect(job.result).toBeNull();
+    expect(job.error).toBeNull();
+    expect(job.createdAt).toBe(job.updatedAt);
+  });
+
+  test("does not share state across calls (deep options copy by reference is fine, but ids differ)", () => {
+    const a = buildEphemeralJob({ prompt: "a", model: "gpt-5-5-pro", reasoning: "standard", options: {} });
+    const b = buildEphemeralJob({ prompt: "b", model: "gpt-5-5-pro", reasoning: "standard", options: {} });
+    expect(a.id).not.toBe(b.id);
+  });
+});
+
+describe("waitTimeoutError", () => {
+  test("includes job, status, elapsedMs, timeoutMs, pollMs in details", () => {
+    const error = waitTimeoutError({
+      job: {
+        id: "job_x",
+        status: "running",
+        prompt: "p",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+        result: null,
+        error: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+      status: "running",
+      timedOut: true,
+      elapsedMs: 65_000,
+      timeoutMs: 60_000,
+      pollMs: 1000,
+    });
+    expect(error.code).toBe("WAIT_TIMEOUT");
+    expect(error.message).toContain("still running");
+    expect(error.message).toContain("1m 5s");
+    expect(error.details?.elapsedMs).toBe(65_000);
+    expect(error.details?.timeoutMs).toBe(60_000);
+    expect(error.details?.pollMs).toBe(1000);
+    // Suggestions name the job id and provide both polling and cancel paths.
+    expect(error.suggestions.some((s) => s.includes("job_x"))).toBe(true);
+    expect(error.suggestions.some((s) => s.includes("--soft-timeout"))).toBe(true);
+    expect(error.suggestions.some((s) => s.includes("cancel"))).toBe(true);
+  });
+
+  test("formats sub-second durations in ms", () => {
+    const error = waitTimeoutError({
+      job: {
+        id: "job_y",
+        status: "queued",
+        prompt: "p",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+        result: null,
+        error: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+      status: "queued",
+      timedOut: true,
+      elapsedMs: 250,
+      timeoutMs: 200,
+      pollMs: 50,
+    });
+    expect(error.message).toContain("250ms");
+  });
+
+  test("formats whole-minute durations without trailing seconds", () => {
+    const error = waitTimeoutError({
+      job: {
+        id: "job_z",
+        status: "running",
+        prompt: "p",
+        model: "gpt-5-5-pro",
+        reasoning: "standard",
+        options: {},
+        result: null,
+        error: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+      status: "running",
+      timedOut: true,
+      elapsedMs: 120_000,
+      timeoutMs: 120_000,
+      pollMs: 1000,
+    });
+    expect(error.message).toMatch(/2m(?!\s\d)/);
   });
 });
