@@ -9,6 +9,7 @@ export interface BrowserCookie {
   secure?: boolean;
   httpOnly?: boolean;
   sameSite?: string;
+  includeSubdomains?: boolean;
 }
 
 export interface CookieExport {
@@ -48,8 +49,10 @@ export function sanitizeCookies(cookies: BrowserCookie[]): BrowserCookie[] {
   for (const cookie of cookies) {
     if (!cookie.name || cookie.value === undefined) continue;
     if (isVolatileCookieName(cookie.name)) continue;
-    const domain = stripLeadingDot(cookie.domain || "chatgpt.com");
+    const rawDomain = cookie.domain || "chatgpt.com";
+    const domain = stripLeadingDot(rawDomain);
     const path = cookie.path || "/";
+    const includeSubdomains = rawDomain.startsWith(".") || cookie.includeSubdomains === true;
     deduped.set(`${cookie.name}|${domain}|${path}`, {
       name: cookie.name,
       value: cookie.value,
@@ -59,6 +62,7 @@ export function sanitizeCookies(cookies: BrowserCookie[]): BrowserCookie[] {
       ...(cookie.secure !== undefined ? { secure: cookie.secure } : {}),
       ...(cookie.httpOnly !== undefined ? { httpOnly: cookie.httpOnly } : {}),
       ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
+      ...(includeSubdomains ? { includeSubdomains: true } : {}),
     });
   }
   return [...deduped.values()].sort((left, right) => left.name.localeCompare(right.name));
@@ -115,7 +119,7 @@ export function toNetscapeCookieJar(cookies: BrowserCookie[]): string {
   ];
   for (const cookie of sanitizeCookies(cookies)) {
     const domain = stripLeadingDot(cookie.domain);
-    const includeSubdomains = cookie.domain.startsWith(".") ? "TRUE" : "FALSE";
+    const includeSubdomains = cookie.includeSubdomains ? "TRUE" : "FALSE";
     const secure = cookie.secure ? "TRUE" : "FALSE";
     const expires = Math.trunc(cookie.expires ?? 0);
     lines.push(
