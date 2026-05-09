@@ -261,6 +261,210 @@ describe("ChatGPT transport", () => {
       );
     });
   });
+
+  test("HTTP 431 from the auth probe surfaces as CHATGPT_PROBE_FAILED with cookie-bloat guidance", async () => {
+    // Regression guard: before the probe_failed split this fired as
+    // logged_out, which sent agents down the wrong remediation path. The
+    // 431-specific message must mention cookie buildup, not "sign in again".
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: false,
+          status: 431,
+          body: "ChatGPT auth session probe returned HTTP 431.",
+          code: "CHATGPT_PROBE_FAILED",
+        }) as T);
+
+      try {
+        await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+        throw new Error("Expected CHATGPT_PROBE_FAILED.");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProError);
+        const proError = error as ProError;
+        expect(proError.code).toBe("CHATGPT_PROBE_FAILED");
+        expect(proError.message).toContain("HTTP 431");
+        expect(proError.suggestions.some((s) => s.toLowerCase().includes("cookie"))).toBe(true);
+        expect(proError.suggestions.some((s) => s.includes("auth capture"))).toBe(true);
+        expect(proError.details?.status).toBe(431);
+      }
+    });
+  });
+
+  test("non-431 probe failures still distinguish probe_failed from logged_out", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: false,
+          status: 502,
+          body: "ChatGPT auth session probe returned HTTP 502.",
+          code: "CHATGPT_PROBE_FAILED",
+        }) as T);
+
+      try {
+        await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+        throw new Error("Expected CHATGPT_PROBE_FAILED.");
+      } catch (error) {
+        const proError = error as ProError;
+        expect(proError.code).toBe("CHATGPT_PROBE_FAILED");
+        expect(proError.suggestions.some((s) => s.includes("Reload the CDP ChatGPT tab"))).toBe(true);
+        // 502 is NOT 431; do not inappropriately suggest cookie remediation.
+        expect(proError.suggestions.some((s) => s.toLowerCase().includes("cookie"))).toBe(false);
+      }
+    });
+  });
+
+  test("the in-page auth probe pins referrerPolicy to no-referrer", async () => {
+    // The 431 saga we shipped traced back to the in-page fetch inheriting
+    // the page's full URL as Referer. If a refactor drops the explicit
+    // referrerPolicy, oversize tracking URLs will inflate headers again.
+    await withTokenFile(async (sessionTokenPath) => {
+      let captured = "";
+      const pageEvaluator = (async <T>(_base: string, expression: string): Promise<T> => {
+        captured = expression;
+        return { ok: true, status: 200, body: conversationStream("OK") } as T;
+      });
+
+      await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+      expect(captured).toContain('referrerPolicy: "no-referrer"');
+      // And the auth-session URL is also present (we expect both together).
+      expect(captured).toContain("https://chatgpt.com/api/auth/session");
+    });
+  });
+
+  test("retries on common transient 5xx upstream codes", async () => {
+    // Lock down which codes get retried. A regression that narrows isRetryable
+    // (e.g. only 503) would silently ship; verify 500/502/504 are also
+    // retryable until we explicitly decide otherwise.
+    for (const transientStatus of [500, 502, 504]) {
+      await withTokenFile(async (sessionTokenPath) => {
+        let attempts = 0;
+        const pageEvaluator = (async <T>(): Promise<T> => {
+          attempts += 1;
+          if (attempts === 1) return { ok: false, status: transientStatus, body: "busy" } as T;
+          return { ok: true, status: 200, body: conversationStream("OK") } as T;
+        });
+        const result = await runChatGptJob(job(), {
+          sessionTokenPath,
+          pageEvaluator,
+          retries: 1,
+          retryDelayMs: 0,
+        });
+        expect(result).toBe("OK");
+        expect(attempts).toBe(2);
+      });
+    }
+  });
+
+  test("does NOT retry on 4xx authorization failures (would burn quota or amplify rate limits)", async () => {
+    // 401 / 403 from the upstream conversation endpoint indicate auth has
+    // gone bad; retrying just hammers the API. Verify the first attempt
+    // throws and we did not silently retry.
+    for (const fatalStatus of [401, 403]) {
+      await withTokenFile(async (sessionTokenPath) => {
+        let attempts = 0;
+        const pageEvaluator = (async <T>(): Promise<T> => {
+          attempts += 1;
+          return { ok: false, status: fatalStatus, body: "<html>denied</html>" } as T;
+        });
+        await expect(
+          runChatGptJob(job(), {
+            sessionTokenPath,
+            pageEvaluator,
+            retries: 3,
+            retryDelayMs: 0,
+          }),
+        ).rejects.toThrow(ProError);
+        expect(attempts).toBe(1);
+      });
+    }
+  });
+
+  test("CHATGPT_PAGE_LOGGED_OUT and CHATGPT_PROBE_FAILED are NOT retried (terminal auth states)", async () => {
+    for (const code of ["CHATGPT_PAGE_LOGGED_OUT", "CHATGPT_PROBE_FAILED"] as const) {
+      await withTokenFile(async (sessionTokenPath) => {
+        let attempts = 0;
+        const pageEvaluator = (async <T>(): Promise<T> => {
+          attempts += 1;
+          return { ok: false, status: 431, body: "x", code } as T;
+        });
+        await expect(
+          runChatGptJob(job(), { sessionTokenPath, pageEvaluator, retries: 3, retryDelayMs: 0 }),
+        ).rejects.toThrow();
+        expect(attempts).toBe(1);
+      });
+    }
+  });
+
+  test("missing session token throws SESSION_TOKEN_MISSING with auth exit code", async () => {
+    try {
+      await runChatGptJob(job(), { sessionTokenPath: "/tmp/nonexistent-token-file.json" });
+      throw new Error("Expected SESSION_TOKEN_MISSING.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ProError);
+      const proError = error as ProError;
+      expect(proError.code).toBe("SESSION_TOKEN_MISSING");
+      expect(proError.suggestions[0]).toContain("auth capture");
+    }
+  });
+
+  test("expired session token throws SESSION_TOKEN_EXPIRED", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pro-token-expired-"));
+    const path = join(dir, "token.json");
+    try {
+      const expired = {
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        source: "pro-cli-cdp-page",
+        accessToken: fakeJwt(),
+        accountId: "acct_test",
+        // Expired 1 hour ago.
+        expiresAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      };
+      await writeFile(path, JSON.stringify(expired));
+      try {
+        await runChatGptJob(job(), { sessionTokenPath: path });
+        throw new Error("Expected SESSION_TOKEN_EXPIRED.");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProError);
+        expect((error as ProError).code).toBe("SESSION_TOKEN_EXPIRED");
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("missing accountId on the token throws ACCOUNT_ID_MISSING", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pro-token-no-account-"));
+    const path = join(dir, "token.json");
+    try {
+      // JWT with no chatgpt_account_id claim.
+      const noAccountJwt = [
+        "header",
+        Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url"),
+        "sig",
+      ].join(".");
+      await writeFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          generatedAt: new Date().toISOString(),
+          source: "pro-cli-cdp-page",
+          accessToken: noAccountJwt,
+          // accountId intentionally omitted
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+      );
+      try {
+        await runChatGptJob(job(), { sessionTokenPath: path });
+        throw new Error("Expected ACCOUNT_ID_MISSING.");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProError);
+        expect((error as ProError).code).toBe("ACCOUNT_ID_MISSING");
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function job(): JobRecord {
