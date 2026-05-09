@@ -19,7 +19,7 @@ interface RawFetchResult {
   ok: boolean;
   status: number;
   body: string;
-  code?: "CHATGPT_PAGE_MISSING" | "CHATGPT_PAGE_LOGGED_OUT";
+  code?: "CHATGPT_PAGE_MISSING" | "CHATGPT_PAGE_LOGGED_OUT" | "CHATGPT_PROBE_FAILED";
 }
 
 export async function fetchAccountSummary(cdpBase?: string): Promise<AccountSummary> {
@@ -29,7 +29,15 @@ export async function fetchAccountSummary(cdpBase?: string): Promise<AccountSumm
     }
     const sessionResponse = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
     const session = (await sessionResponse.json().catch(() => null)) as { accessToken?: unknown } | null;
-    if (!sessionResponse.ok || typeof session?.accessToken !== "string" || !session.accessToken) {
+    if (!sessionResponse.ok && sessionResponse.status !== 401) {
+      return {
+        ok: false,
+        status: sessionResponse.status,
+        code: "CHATGPT_PROBE_FAILED",
+        body: `ChatGPT auth session probe returned HTTP ${sessionResponse.status}.`,
+      };
+    }
+    if (typeof session?.accessToken !== "string" || !session.accessToken) {
       return { ok: false, status: sessionResponse.status, code: "CHATGPT_PAGE_LOGGED_OUT", body: "" };
     }
     const response = await fetch("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", {
@@ -59,6 +67,24 @@ export async function fetchAccountSummary(cdpBase?: string): Promise<AccountSumm
       exitCode: EXIT.auth,
       suggestions: ["Sign in to ChatGPT, then run pro-cli auth capture."],
     });
+  }
+  if (raw.code === "CHATGPT_PROBE_FAILED") {
+    const status = raw.status;
+    const suggestions =
+      status === 431
+        ? [
+            "HTTP 431 indicates oversize request headers; the CDP Chrome profile likely has stale cookie buildup.",
+            "Sign out of ChatGPT in the CDP window, sign back in, then run pro-cli auth capture.",
+          ]
+        : [
+            `The ChatGPT auth session probe failed with HTTP ${status}; cannot determine login state.`,
+            "Reload the CDP ChatGPT tab and retry.",
+          ];
+    throw new ProError(
+      "CHATGPT_PROBE_FAILED",
+      `Could not determine ChatGPT login state from the CDP page (HTTP ${status}).`,
+      { exitCode: EXIT.auth, suggestions, details: { status } },
+    );
   }
   if (!raw.ok) {
     throw new ProError("UPSTREAM_REJECTED", `accounts/check returned HTTP ${raw.status}.`, {

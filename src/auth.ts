@@ -27,7 +27,12 @@ export interface AuthStatus {
   rawValuesPrinted: false;
 }
 
-export type BrowserSessionState = "present" | "logged_out" | "page_missing" | "cdp_unavailable";
+export type BrowserSessionState =
+  | "present"
+  | "logged_out"
+  | "probe_failed"
+  | "page_missing"
+  | "cdp_unavailable";
 
 export interface BrowserSessionStatus {
   status: BrowserSessionState;
@@ -132,6 +137,21 @@ export async function getBrowserSessionStatus(
       };
     }
 
+    const probeStatus = typeof result?.status === "number" ? result.status : 0;
+    const isLoggedOutSignal = probeStatus === 200 || probeStatus === 401;
+    if (probeStatus !== 0 && !isLoggedOutSignal) {
+      return {
+        status: "probe_failed",
+        cdpBase,
+        httpStatus: probeStatus,
+        pageOrigin: result?.origin,
+        errorCode: "CHATGPT_PROBE_FAILED",
+        message: `ChatGPT auth session probe returned HTTP ${probeStatus}.`,
+        suggestions: probeFailedSuggestions(probeStatus, cdpBase),
+        rawValuesPrinted: false,
+      };
+    }
+
     return {
       status: "logged_out",
       cdpBase,
@@ -165,6 +185,26 @@ export async function getBrowserSessionStatus(
       rawValuesPrinted: false,
     };
   }
+}
+
+function probeFailedSuggestions(status: number, cdpBase: string): string[] {
+  if (status === 431) {
+    return [
+      "HTTP 431 means the request headers were too large; the CDP Chrome profile likely has stale cookie buildup.",
+      `Sign out of ChatGPT in the CDP window, sign back in, then run pro-cli auth capture --cdp ${cdpBase} --json.`,
+      "If 431 persists, delete ~/.pro-cli/chrome-profile and rerun pro-cli auth command.",
+    ];
+  }
+  if (status >= 500) {
+    return [
+      `ChatGPT returned HTTP ${status} on the auth probe; the upstream is likely degraded.`,
+      "Reload the CDP ChatGPT tab, wait, and rerun pro-cli doctor --json.",
+    ];
+  }
+  return [
+    `The CDP ChatGPT auth session probe returned HTTP ${status}; cannot determine login state.`,
+    "Reload the CDP ChatGPT tab and rerun pro-cli doctor --json. If the page is on a non-chatgpt URL, navigate back to https://chatgpt.com/.",
+  ];
 }
 
 export interface CaptureOptions {

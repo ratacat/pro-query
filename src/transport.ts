@@ -98,6 +98,30 @@ async function postChatGptJob(
       });
     }
 
+    if (browserResult.code === "CHATGPT_PROBE_FAILED") {
+      const status = browserResult.status;
+      const suggestions =
+        status === 431
+          ? [
+              "HTTP 431 indicates oversize request headers; the CDP Chrome profile likely has stale cookie buildup.",
+              "Sign out of ChatGPT in the CDP window, sign back in to drop expired cookies, then run pro-cli auth capture --cdp http://127.0.0.1:9222 --json.",
+              "If 431 persists, delete ~/.pro-cli/chrome-profile and rerun pro-cli auth command.",
+            ]
+          : [
+              `The ChatGPT auth session probe failed with HTTP ${status}; pro-cli cannot tell whether the page is logged in.`,
+              "Reload the CDP ChatGPT tab and retry. Run pro-cli doctor --json for diagnostics.",
+            ];
+      throw new ProError(
+        "CHATGPT_PROBE_FAILED",
+        `Could not determine ChatGPT login state from the CDP page (HTTP ${status}).`,
+        {
+          exitCode: EXIT.auth,
+          suggestions,
+          details: { status, preview: browserResult.body.slice(0, 240).replace(/\s+/g, " ") },
+        },
+      );
+    }
+
     if (!browserResult.ok) {
       throw new ProError("UPSTREAM_REJECTED", `ChatGPT backend returned HTTP ${browserResult.status}.`, {
         exitCode: EXIT.upstream,
@@ -120,7 +144,7 @@ interface BrowserFetchResult {
   ok: boolean;
   status: number;
   body: string;
-  code?: "CHATGPT_PAGE_MISSING" | "CHATGPT_PAGE_LOGGED_OUT";
+  code?: "CHATGPT_PAGE_MISSING" | "CHATGPT_PAGE_LOGGED_OUT" | "CHATGPT_PROBE_FAILED";
 }
 
 function buildBrowserFetchExpression(requestBody: Record<string, unknown>, accountId: string): string {
@@ -140,7 +164,15 @@ function buildBrowserFetchExpression(requestBody: Record<string, unknown>, accou
 
     const sessionResponse = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
     const session = (await sessionResponse.json().catch(() => null)) as { accessToken?: unknown } | null;
-    if (!sessionResponse.ok || typeof session?.accessToken !== "string" || !session.accessToken) {
+    if (!sessionResponse.ok && sessionResponse.status !== 401) {
+      return {
+        ok: false,
+        status: sessionResponse.status,
+        code: "CHATGPT_PROBE_FAILED",
+        body: `ChatGPT auth session probe returned HTTP ${sessionResponse.status}.`,
+      };
+    }
+    if (typeof session?.accessToken !== "string" || !session.accessToken) {
       return {
         ok: false,
         status: sessionResponse.status,

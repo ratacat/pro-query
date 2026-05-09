@@ -517,6 +517,13 @@ function buildDoctorNext(
       reason: "The CDP ChatGPT page is reachable but logged out; sign in there, then recapture auth.",
     };
   }
+  if (authReady && browserStatus === "probe_failed") {
+    return {
+      command: `pro-cli auth capture --cdp ${cdpBase} --json`,
+      reason:
+        "The CDP ChatGPT auth probe returned an unexpected HTTP status (often cookie bloat causing 431); sign out and back in, then recapture auth.",
+    };
+  }
   if (authReady && (browserStatus === "page_missing" || browserStatus === "cdp_unavailable")) {
     return {
       command: "pro-cli auth command --json",
