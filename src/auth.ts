@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { access, readdir, rename, rm, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { EXIT, ProError } from "./errors";
 import { evaluateInCdpPage, getCookiesFromCdp } from "./cdp";
@@ -103,7 +104,7 @@ export async function getBrowserSessionStatus(
             code: "CHATGPT_PAGE_MISSING"
           };
         }
-        const res = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
+        const res = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include", referrerPolicy: "no-referrer" });
         const json = await res.json().catch(() => null);
         return {
           status: res.status,
@@ -337,6 +338,8 @@ export interface ResetProfileResult {
   prunedBackups: string[];
   launched: { command: string } | null;
   cdp: string;
+  portCollision: PortCollisionInfo;
+  legacyArtifacts: LegacyArtifactInfo;
   next: { command: string; reason: string };
 }
 
@@ -375,6 +378,8 @@ export async function resetAuthProfile(options: ResetProfileOptions): Promise<Re
   }
 
   const cdp = `http://127.0.0.1:${options.port}`;
+  const portCollision = detectPortCollision(options.port, profileDir);
+  const legacyArtifacts = await detectLegacyArtifacts();
   return {
     profileDir,
     killedPids,
@@ -382,6 +387,8 @@ export async function resetAuthProfile(options: ResetProfileOptions): Promise<Re
     prunedBackups,
     launched,
     cdp,
+    portCollision,
+    legacyArtifacts,
     next: {
       command: `pro-cli auth capture --cdp ${cdp} --json`,
       reason: launched
@@ -485,4 +492,84 @@ async function pathExists(path: string): Promise<boolean> {
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface PortListenerInfo {
+  pid: number;
+  command: string;
+  isChrome: boolean;
+  userDataDir?: string;
+  matchesProfile: boolean;
+}
+
+export interface PortCollisionInfo {
+  port: string;
+  inUse: boolean;
+  listeners: PortListenerInfo[];
+  conflict: boolean;
+  warning?: string;
+}
+
+export function detectPortCollision(port: string, expectedProfileDir: string): PortCollisionInfo {
+  const lsof = spawnSync("lsof", ["-i", `:${port}`, "-sTCP:LISTEN", "-P", "-n"], { encoding: "utf8" });
+  const listeners: PortListenerInfo[] = [];
+  if (lsof.status === 0 && lsof.stdout) {
+    const seen = new Set<number>();
+    const lines = lsof.stdout.split("\n").slice(1);
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 2) continue;
+      const pid = Number.parseInt(parts[1], 10);
+      if (!Number.isFinite(pid) || seen.has(pid)) continue;
+      seen.add(pid);
+      const ps = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+      const command = (ps.stdout ?? "").trim();
+      const isChrome = /chrome/i.test(command);
+      const userDataMatch = command.match(/--user-data-dir=([^\s]+)/);
+      const userDataDir = userDataMatch ? userDataMatch[1].replace(/^['"]|['"]$/g, "") : undefined;
+      const matchesProfile = userDataDir === expectedProfileDir;
+      listeners.push({ pid, command, isChrome, userDataDir, matchesProfile });
+    }
+  }
+  const conflict = listeners.some((l) => l.isChrome && !l.matchesProfile);
+  const info: PortCollisionInfo = {
+    port,
+    inUse: listeners.length > 0,
+    listeners,
+    conflict,
+  };
+  if (conflict) {
+    const conflictPids = listeners.filter((l) => l.isChrome && !l.matchesProfile).map((l) => l.pid);
+    info.warning = `Another Chrome (pid ${conflictPids.join(", ")}) is bound to port ${port} with a different --user-data-dir. CDP requests will race between Chromes; results become non-deterministic. Quit those Chrome instances or pick a different --port.`;
+  } else if (listeners.length > 1) {
+    info.warning = `Multiple processes are listening on port ${port}; this can cause CDP request routing to be non-deterministic.`;
+  }
+  return info;
+}
+
+export interface LegacyArtifactInfo {
+  legacyHome: string;
+  legacyHomeExists: boolean;
+  legacyProfileDir: string;
+  legacyProfileExists: boolean;
+  warning?: string;
+}
+
+export async function detectLegacyArtifacts(): Promise<LegacyArtifactInfo> {
+  const legacyHome = join(homedir(), ".pro");
+  const legacyProfileDir = join(legacyHome, "chrome-profile");
+  const legacyHomeExists = await pathExists(legacyHome);
+  const legacyProfileExists = await pathExists(legacyProfileDir);
+  const info: LegacyArtifactInfo = {
+    legacyHome,
+    legacyHomeExists,
+    legacyProfileDir,
+    legacyProfileExists,
+  };
+  if (legacyProfileExists) {
+    info.warning = `Legacy Chrome profile dir ${legacyProfileDir} still exists. An external command opening it can bind the CDP port and conflict with pro-cli's profile. Move it aside (mv ${legacyProfileDir} ${legacyProfileDir}.legacy-backup) or delete it.`;
+  } else if (legacyHomeExists) {
+    info.warning = `Legacy pro-cli home ${legacyHome} still exists. Safe to remove if pro-cli is functioning from ~/.pro-cli.`;
+  }
+  return info;
 }

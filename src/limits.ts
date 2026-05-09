@@ -27,7 +27,7 @@ export async function fetchAccountSummary(cdpBase?: string): Promise<AccountSumm
     if (location.origin !== "https://chatgpt.com") {
       return { ok: false, status: 0, code: "CHATGPT_PAGE_MISSING", body: location.href };
     }
-    const sessionResponse = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
+    const sessionResponse = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include", referrerPolicy: "no-referrer" });
     const session = (await sessionResponse.json().catch(() => null)) as { accessToken?: unknown } | null;
     if (!sessionResponse.ok && sessionResponse.status !== 401) {
       return {

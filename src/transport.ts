@@ -162,7 +162,7 @@ function buildBrowserFetchExpression(requestBody: Record<string, unknown>, accou
       };
     }
 
-    const sessionResponse = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
+    const sessionResponse = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include", referrerPolicy: "no-referrer" });
     const session = (await sessionResponse.json().catch(() => null)) as { accessToken?: unknown } | null;
     if (!sessionResponse.ok && sessionResponse.status !== 401) {
       return {

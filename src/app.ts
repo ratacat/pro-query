@@ -2,7 +2,15 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
 import { flagBoolean, flagString, parseArgs } from "./args";
-import { captureAuth, defaultCdpBase, getAuthStatus, getBrowserSessionStatus, resetAuthProfile } from "./auth";
+import {
+  captureAuth,
+  defaultCdpBase,
+  detectLegacyArtifacts,
+  detectPortCollision,
+  getAuthStatus,
+  getBrowserSessionStatus,
+  resetAuthProfile,
+} from "./auth";
 import { loadConfig, migrateLegacyDefaultHome, resolvePaths, saveConfig } from "./config";
 import { ensureDaemonRunning, getDaemonStatus, runDaemonServer, stopDaemon } from "./daemon";
 import { DEFAULT_MODEL, DEFAULT_REASONING, REASONING_LEVELS, isReasoningLevel } from "./defaults";
@@ -460,12 +468,16 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         );
         const authReady = auth.tokenStatus === "present" && auth.accountIdPresent;
         const ready = authReady && browserSession.status === "present";
+        const cdpPort = new URL(cdpBase).port || "9222";
+        const profileDir = join(paths.home, "chrome-profile");
         writeSuccess(io, mode, {
           auth,
           browserSession,
           daemon: await getDaemonStatus(paths),
           ready,
           next: buildDoctorNext(authReady, browserSession.status, cdpBase),
+          portCollision: detectPortCollision(cdpPort, profileDir),
+          legacyArtifacts: await detectLegacyArtifacts(),
           storage: { home: paths.home, dbPath: paths.dbPath },
           transport: {
             status: ready ? "configured" : "auth_required",
@@ -609,6 +621,7 @@ function buildAuthCommand(home: string, port: string): Record<string, unknown> {
     cdp,
     profileDir,
     port,
+    portCollision: detectPortCollision(port, profileDir),
     safety: "Recommended profile is dedicated to pro-cli; keep it open for jobs and do not expose a normal browser profile over CDP.",
   };
 }
