@@ -9,7 +9,9 @@ import {
   detectPortCollision,
   getAuthStatus,
   getBrowserSessionStatus,
+  hideProCliChromeWindow,
   resetAuthProfile,
+  showProCliChromeWindow,
 } from "./auth";
 import { loadConfig, migrateLegacyDefaultHome, resolvePaths, saveConfig } from "./config";
 import { ensureDaemonRunning, getDaemonStatus, runDaemonServer, stopDaemon } from "./daemon";
@@ -109,8 +111,20 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           writeSuccess(io, mode, result);
           return EXIT.success;
         }
+        if (subcommand === "hide") {
+          const cdpBase = defaultCdpBase(flagString(parsed.flags, "port"), flagString(parsed.flags, "cdp"));
+          const result = await hideProCliChromeWindow(cdpBase);
+          writeSuccess(io, mode, result);
+          return EXIT.success;
+        }
+        if (subcommand === "show") {
+          const cdpBase = defaultCdpBase(flagString(parsed.flags, "port"), flagString(parsed.flags, "cdp"));
+          const result = await showProCliChromeWindow(cdpBase);
+          writeSuccess(io, mode, result);
+          return EXIT.success;
+        }
         throw invalidArgs("Unknown auth command.", [
-          "Use pro-cli auth status, pro-cli auth command, pro-cli auth capture, or pro-cli auth reset.",
+          "Use pro-cli auth status, pro-cli auth command, pro-cli auth capture, pro-cli auth reset, pro-cli auth hide, or pro-cli auth show.",
         ]);
       }
       case "models": {
@@ -509,6 +523,8 @@ function commandList(): string[] {
     "auth status",
     "auth capture",
     "auth reset",
+    "auth hide",
+    "auth show",
     "models",
     "ask",
     "odds",

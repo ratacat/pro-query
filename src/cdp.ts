@@ -96,6 +96,39 @@ async function resolveCdpWebSocketUrl(cdpBase: string): Promise<string> {
   return resolveBrowserWebSocketUrl(base);
 }
 
+export async function callBrowserCdp<T>(
+  cdpBase: string,
+  method: string,
+  params?: Record<string, unknown>,
+  timeoutMs = 5000,
+): Promise<T> {
+  const wsUrl = await resolveBrowserWebSocketUrl(cdpBase.replace(/\/$/, ""));
+  const client = await CdpClient.connect(wsUrl, timeoutMs);
+  try {
+    return await client.send<T>(method, params);
+  } finally {
+    client.close();
+  }
+}
+
+export async function findChatGptTargetId(cdpBase: string): Promise<string | null> {
+  const base = cdpBase.replace(/\/$/, "");
+  let response: Response;
+  try {
+    response = await fetch(`${base}/json`);
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  const targets = (await response.json().catch(() => [])) as Array<{
+    id?: string;
+    type?: string;
+    url?: string;
+  }>;
+  const chatgpt = targets.find((t) => t.type === "page" && t.url?.startsWith("https://chatgpt.com/"));
+  return chatgpt?.id ?? null;
+}
+
 async function resolveBrowserWebSocketUrl(base: string): Promise<string> {
   let response: Response;
   try {

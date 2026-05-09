@@ -3,7 +3,7 @@ import { access, readdir, rename, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { EXIT, ProError } from "./errors";
-import { evaluateInCdpPage, getCookiesFromCdp } from "./cdp";
+import { callBrowserCdp, evaluateInCdpPage, findChatGptTargetId, getCookiesFromCdp } from "./cdp";
 import {
   chatGptOrigins,
   cookieSummary,
@@ -545,6 +545,64 @@ export function detectPortCollision(port: string, expectedProfileDir: string): P
     info.warning = `Multiple processes are listening on port ${port}; this can cause CDP request routing to be non-deterministic.`;
   }
   return info;
+}
+
+export interface WindowBounds {
+  left?: number;
+  top?: number;
+  width?: number;
+  height?: number;
+  windowState?: "normal" | "minimized" | "maximized" | "fullscreen";
+}
+
+export interface MoveWindowResult {
+  cdpBase: string;
+  targetId: string;
+  windowId: number;
+  before: WindowBounds;
+  after: WindowBounds;
+  note: string;
+}
+
+const HIDDEN_BOUNDS: WindowBounds = { left: -32000, top: -32000, width: 400, height: 300 };
+const SHOWN_BOUNDS: WindowBounds = { left: 100, top: 100, width: 1200, height: 800 };
+
+export async function setProCliChromeWindowBounds(
+  cdpBase: string,
+  bounds: WindowBounds,
+): Promise<MoveWindowResult> {
+  const targetId = await findChatGptTargetId(cdpBase);
+  if (!targetId) {
+    throw new ProError("CHATGPT_PAGE_MISSING", "No chatgpt.com tab is available over CDP.", {
+      exitCode: EXIT.auth,
+      suggestions: [
+        "Open the ChatGPT Chrome window via pro-cli auth command, then retry.",
+        "If the window was closed, your stored auth still works; relaunching restores access.",
+      ],
+    });
+  }
+  const window = await callBrowserCdp<{ windowId: number; bounds: WindowBounds }>(
+    cdpBase,
+    "Browser.getWindowForTarget",
+    { targetId },
+  );
+  await callBrowserCdp<unknown>(cdpBase, "Browser.setWindowBounds", {
+    windowId: window.windowId,
+    bounds,
+  });
+  const isHidden = (bounds.left ?? 0) < -10000 || (bounds.top ?? 0) < -10000;
+  const note = isHidden
+    ? "Window parked off-screen. CDP keeps working. Run pro-cli auth show to bring it back; closing Chrome from the dock loses the session."
+    : "Window restored on-screen.";
+  return { cdpBase, targetId, windowId: window.windowId, before: window.bounds, after: bounds, note };
+}
+
+export function hideProCliChromeWindow(cdpBase: string): Promise<MoveWindowResult> {
+  return setProCliChromeWindowBounds(cdpBase, HIDDEN_BOUNDS);
+}
+
+export function showProCliChromeWindow(cdpBase: string): Promise<MoveWindowResult> {
+  return setProCliChromeWindowBounds(cdpBase, SHOWN_BOUNDS);
 }
 
 export interface LegacyArtifactInfo {
