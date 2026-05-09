@@ -1,7 +1,11 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
 import {
   buildStructuredInstructions,
   extractJsonFromResponse,
+  loadSchema,
   runStructured,
   validateLightly,
 } from "../src/structured";
@@ -14,6 +18,11 @@ describe("extractJsonFromResponse", () => {
 
   test("extracts from a fenced ``` block without language tag", () => {
     expect(extractJsonFromResponse("```\n{\"a\":2}\n```")).toEqual({ a: 2 });
+  });
+
+  test("skips non-json fences before the JSON fence", () => {
+    const text = "```ts\nconst ignored = true;\n```\n\n```json\n{\"ok\":true}\n```";
+    expect(extractJsonFromResponse(text)).toEqual({ ok: true });
   });
 
   test("falls back to first balanced object when no fence", () => {
@@ -195,6 +204,27 @@ describe("buildStructuredInstructions", () => {
 
   test("throws when neither is given", () => {
     expect(() => buildStructuredInstructions(undefined, undefined)).toThrow();
+  });
+});
+
+describe("loadSchema", () => {
+  test("loads and parses a schema from an @file argument relative to cwd", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pro-schema-"));
+    try {
+      await writeFile(join(dir, "schema.json"), JSON.stringify({ type: "object", required: ["name"] }));
+
+      const schema = await loadSchema("@schema.json", dir);
+
+      expect(schema).toEqual({ type: "object", required: ["name"] });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects invalid schema JSON with STRUCTURED_BAD_SCHEMA", async () => {
+    await expect(loadSchema("{not json", process.cwd())).rejects.toMatchObject({
+      code: "STRUCTURED_BAD_SCHEMA",
+    });
   });
 });
 

@@ -868,6 +868,11 @@ function buildRequestBody(job: JobRecord): Record<string, unknown> {
   const conversationId = stringOption(job.options.conversationId);
   const parentMessageId = stringOption(job.options.parentMessageId) ?? "client-created-root";
   const temporary = booleanOption(job.options.temporary, !conversationId);
+  const verbosity = stringOption(job.options.verbosity);
+  const reasoningSummary = stringOption(job.options.reasoningSummary);
+  const toolChoice = stringOption(job.options.toolChoice);
+  const parallelTools =
+    typeof job.options.parallelTools === "boolean" ? job.options.parallelTools : undefined;
   const body: Record<string, unknown> = {
     action: "next",
     messages: [
@@ -901,6 +906,13 @@ function buildRequestBody(job: JobRecord): Record<string, unknown> {
     body.history_and_training_disabled = true;
     body.client_contextual_info = { app_name: "chatgpt.com" };
   }
+  if (verbosity) body.verbosity = verbosity;
+  if (reasoningSummary) body.reasoning_summary = reasoningSummary;
+  if (toolChoice) body.tool_choice = toolChoice;
+  if (parallelTools !== undefined) {
+    body.parallel_tools = parallelTools;
+    body.force_parallel_switch = parallelTools ? "auto" : "none";
+  }
   body.thinking_effort = thinkingEffort;
 
   return body;
@@ -931,7 +943,7 @@ function readResponseText(
   raw: string,
   onLimits?: (observations: LimitsObservation[]) => void,
 ): string {
-  let buffer = raw;
+  let buffer = raw.replace(/\r\n?/g, "\n");
   let completedText: string | null = null;
   let completed = false;
   const state: ResponseParseState = { acceptsTextContinuation: false, lastAppendText: null };
@@ -969,7 +981,11 @@ function readResponseText(
   if (!completed) {
     throw new ProError("STREAM_INCOMPLETE", "ChatGPT stream ended before the conversation completed.", {
       exitCode: EXIT.network,
-      suggestions: ["Retry the job.", "Increase --timeout if the request is large."],
+      suggestions: [
+        "Retry the same real request only if the user still needs it; do not send a probe or smoke-test query.",
+        "Increase --timeout if the request is large.",
+        "Run pro-cli doctor --json to check local auth/browser health without spending Pro quota.",
+      ],
       details: completedText ? { partialPreview: completedText.slice(0, 160) } : undefined,
     });
   }
@@ -977,7 +993,11 @@ function readResponseText(
   if (completedText === null) {
     throw new ProError("EMPTY_RESPONSE", "ChatGPT completed without returning assistant text.", {
       exitCode: EXIT.upstream,
-      suggestions: ["Retry the job.", "Check the job in ChatGPT if this persists."],
+      suggestions: [
+        "Retry the same real request only if the user still needs it; do not send a probe or smoke-test query.",
+        "Run pro-cli doctor --json to check local auth/browser health without spending Pro quota.",
+        "Check the job in ChatGPT if this persists.",
+      ],
     });
   }
 

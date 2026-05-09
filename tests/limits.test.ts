@@ -55,6 +55,28 @@ describe("summarizeAccountResponse", () => {
     expect(summary.hasActiveSubscription).toBe(false);
   });
 
+  test("prefers a real account over the default sentinel when ordering is empty", () => {
+    const body = JSON.stringify({
+      accounts: {
+        default: {
+          account: { plan_type: "free" },
+          features: ["base"],
+          entitlement: { has_active_subscription: false },
+        },
+        "uuid-1": {
+          account: { plan_type: "pro" },
+          features: ["gpt5_pro"],
+          entitlement: { has_active_subscription: true, subscription_plan: "chatgptpro" },
+        },
+      },
+      account_ordering: [],
+    });
+    const summary = summarizeAccountResponse(body);
+    expect(summary.planType).toBe("pro");
+    expect(summary.subscriptionPlan).toBe("chatgptpro");
+    expect(summary.features).toEqual(["gpt5_pro"]);
+  });
+
   test("returns empty summary on missing accounts shape", () => {
     const summary = summarizeAccountResponse(JSON.stringify({}));
     expect(summary.planType).toBe(null);

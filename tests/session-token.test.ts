@@ -37,6 +37,16 @@ describe("toSessionTokenExport", () => {
     expect(exported.expiresAt).toBe(new Date(expSeconds * 1000).toISOString());
   });
 
+  test("keeps exp=0 as an expired timestamp instead of treating it as no expiry", () => {
+    const token = jwt({
+      exp: 0,
+      "https://api.openai.com/auth": { chatgpt_account_id: "acct_xyz" },
+    });
+    const exported = toSessionTokenExport(token);
+    expect(exported.expiresAt).toBe("1970-01-01T00:00:00.000Z");
+    expect(isTokenFresh(exported, 0)).toBe(false);
+  });
+
   test("omits accountId when no chatgpt_account_id claim is present", () => {
     const token = jwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
     const exported = toSessionTokenExport(token);

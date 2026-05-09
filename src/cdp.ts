@@ -246,7 +246,10 @@ function cookieAppliesToUrl(cookie: CdpCookie, url: string): boolean {
   if (host !== domain && !host.endsWith(`.${domain}`)) return false;
 
   const cookiePath = cookie.path || "/";
-  return parsed.pathname.startsWith(cookiePath) || cookiePath === "/";
+  if (cookiePath === "/") return true;
+  if (!parsed.pathname.startsWith(cookiePath)) return false;
+  const next = parsed.pathname[cookiePath.length];
+  return next === undefined || next === "/";
 }
 
 function isMissingCdpMethod(error: unknown): boolean {

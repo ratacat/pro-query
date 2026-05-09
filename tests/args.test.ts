@@ -9,12 +9,16 @@ describe("parseArgs: positionals", () => {
     expect(parsed.flags.size).toBe(0);
   });
 
-  test("treats lone -- as a positional (no special end-of-flags handling)", () => {
-    // Document current behavior so a future change is intentional, not
-    // accidental.
-    const parsed = parseArgs(["job", "--", "tail", "-only"]);
-    expect(parsed.positionals).toContain("--");
-    expect(parsed.positionals).toContain("tail");
+  test("uses -- as an end-of-flags delimiter", () => {
+    const parsed = parseArgs(["ask", "--", "--literal-prompt", "--json"]);
+    expect(parsed.positionals).toEqual(["ask", "--literal-prompt", "--json"]);
+    expect(parsed.flags.size).toBe(0);
+  });
+
+  test("a bare -- by itself just ends flag parsing", () => {
+    const parsed = parseArgs(["--"]);
+    expect(parsed.positionals).toEqual([]);
+    expect(parsed.flags.size).toBe(0);
   });
 
   test("a single-dash token is a positional, not a flag", () => {
@@ -54,6 +58,11 @@ describe("parseArgs: boolean flags", () => {
       const parsed = parseArgs([`--${name}`]);
       expect(parsed.flags.get(name)).toBe(true);
     }
+  });
+
+  test("repeating a known boolean flag still reads as true", () => {
+    const parsed = parseArgs(["--json", "--json"]);
+    expect(flagBoolean(parsed.flags, "json")).toBe(true);
   });
 });
 
@@ -99,16 +108,6 @@ describe("parseArgs: value flags", () => {
 });
 
 describe("parseArgs: invalid input", () => {
-  test("the bare token -- is positional but --= is not (empty name)", () => {
-    try {
-      parseArgs(["--"]);
-      // -- is positional per current behavior; nothing to throw here.
-    } catch (error) {
-      // If a future change errors on bare --, surface it.
-      expect((error as ProError).code).toBe("INVALID_ARGS");
-    }
-  });
-
   test("an empty equals-name throws INVALID_ARGS", () => {
     try {
       parseArgs(["--=value"]);
@@ -162,12 +161,9 @@ describe("flagString helper", () => {
     expect(flagString(parseArgs([]).flags, "model")).toBeUndefined();
   });
 
-  test("returns undefined for repeated flags (so single-value reads fail loudly via undefined)", () => {
-    // Important contract: callers using flagString on a repeated flag would
-    // silently drop later occurrences if we returned the first one. Returning
-    // undefined forces them to use flagStrings instead.
+  test("throws for repeated flags so single-value reads cannot fall back to defaults", () => {
     const parsed = parseArgs(["--model", "a", "--model", "b"]);
-    expect(flagString(parsed.flags, "model")).toBeUndefined();
+    expect(() => flagString(parsed.flags, "model")).toThrow(ProError);
   });
 
   test("coerces a true boolean to the literal string 'true'", () => {

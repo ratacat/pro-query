@@ -204,7 +204,13 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           reasoning: askReasoning,
           options: askOptions,
         });
-        writeSuccess(io, mode, await executeEphemeralJob(job, paths));
+        const outcome = await executeEphemeralJob(job, paths);
+        if (isRecord(outcome.error)) {
+          const error = proErrorFromPayload(outcome.error, outcome.exitCode);
+          writeError(io, mode, error);
+          return error.exitCode;
+        }
+        writeSuccess(io, mode, outcome);
         return EXIT.success;
       }
       case "odds": {
@@ -515,6 +521,24 @@ function invalidArgs(message: string, suggestions: string[]): ProError {
   return new ProError("INVALID_ARGS", message, { exitCode: EXIT.invalidArgs, suggestions });
 }
 
+function proErrorFromPayload(error: Record<string, unknown>, exitCode: unknown): ProError {
+  return new ProError(
+    typeof error.code === "string" ? error.code : "UPSTREAM_ERROR",
+    typeof error.message === "string" ? error.message : "ChatGPT request failed.",
+    {
+      exitCode: isExitCode(exitCode) ? exitCode : EXIT.upstream,
+      suggestions: Array.isArray(error.suggestions)
+        ? error.suggestions.filter((item): item is string => typeof item === "string")
+        : [],
+      details: isRecord(error.details) ? error.details : undefined,
+    },
+  );
+}
+
+function isExitCode(value: unknown): value is (typeof EXIT)[keyof typeof EXIT] {
+  return typeof value === "number" && Object.values(EXIT).includes(value as (typeof EXIT)[keyof typeof EXIT]);
+}
+
 function commandList(): string[] {
   return [
     "setup",
@@ -550,8 +574,8 @@ function buildDoctorNext(
 ): Record<string, string> {
   if (authReady && browserStatus === "present") {
     return {
-      command: `pro-cli ask "Reply with OK only." --cdp ${cdpBase} --json`,
-      reason: "Stored auth and the live CDP ChatGPT page are ready; send a smoke query.",
+      command: `pro-cli ask "<your prompt>" --cdp ${cdpBase} --json`,
+      reason: "Stored auth and the live CDP ChatGPT page are ready; send the real request directly.",
     };
   }
   if (authReady && browserStatus === "logged_out") {
@@ -605,10 +629,10 @@ function buildSetupGuide(auth: Awaited<ReturnType<typeof getAuthStatus>>, home: 
         note: "Captures scoped cookies plus the page session token into private local files.",
       },
       {
-        id: "smoke-test",
+        id: "doctor",
         status: ready ? "todo" : "blocked",
-        command: `pro-cli ask "Reply with OK only." --cdp ${authCommand.cdp} --json`,
-        note: "Verifies the live ChatGPT tab, captured auth, CDP port, and backend request path.",
+        command: `pro-cli doctor --cdp ${authCommand.cdp} --json`,
+        note: "Checks stored auth and the live CDP ChatGPT page without spending Pro quota.",
       },
     ],
     auth,

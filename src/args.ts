@@ -25,10 +25,19 @@ const BOOLEAN_FLAGS = new Set([
 export function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags = new Map<string, string | boolean | string[]>();
+  let flagsEnded = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
-    if (!token.startsWith("--") || token === "--") {
+    if (flagsEnded) {
+      positionals.push(token);
+      continue;
+    }
+    if (token === "--") {
+      flagsEnded = true;
+      continue;
+    }
+    if (!token.startsWith("--")) {
       positionals.push(token);
       continue;
     }
@@ -67,7 +76,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
 
     const existing = flags.get(name);
-    if (Array.isArray(existing)) {
+    if (existing === true && value === true && BOOLEAN_FLAGS.has(name)) {
+      flags.set(name, true);
+    } else if (Array.isArray(existing)) {
       existing.push(String(value));
     } else if (existing !== undefined) {
       flags.set(name, [String(existing), String(value)]);
@@ -84,7 +95,13 @@ export function flagString(
   name: string,
 ): string | undefined {
   const value = flags.get(name);
-  if (value === undefined || value === false || Array.isArray(value)) return undefined;
+  if (Array.isArray(value)) {
+    throw new ProError("INVALID_ARGS", `Repeated --${name} is not valid here.`, {
+      exitCode: EXIT.invalidArgs,
+      suggestions: [`Pass --${name} only once.`],
+    });
+  }
+  if (value === undefined || value === false) return undefined;
   if (value === true) return "true";
   return value;
 }

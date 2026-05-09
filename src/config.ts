@@ -1,6 +1,7 @@
 import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { EXIT, ProError } from "./errors";
 
 export interface ProConfig {
   cookieJsonPath?: string;
@@ -23,7 +24,7 @@ const DEFAULT_HOME = "~/.pro-cli";
 const LEGACY_HOME = "~/.pro";
 
 export function resolveHome(env: Record<string, string | undefined>): string {
-  return expandPath(env.PRO_CLI_HOME ?? DEFAULT_HOME);
+  return expandPath(env.PRO_CLI_HOME || DEFAULT_HOME);
 }
 
 export async function migrateLegacyDefaultHome(
@@ -55,17 +56,18 @@ export function resolvePaths(
   config: ProConfig = {},
 ): RuntimePaths {
   const home = resolveHome(env);
+  const cookieJsonPath = env.CHATGPT_COOKIE_JSON || config.cookieJsonPath || join(home, "cookies", "chatgpt.json");
+  const cookieJarPath = env.CHATGPT_COOKIE_JAR || config.cookieJarPath || join(home, "cookies", "chatgpt.txt");
+  const sessionTokenPath =
+    env.CHATGPT_SESSION_TOKEN_JSON ||
+    config.sessionTokenPath ||
+    join(home, "tokens", "chatgpt-session.json");
   return {
     home,
     configPath: join(home, "config.json"),
-    cookieJsonPath:
-      env.CHATGPT_COOKIE_JSON ?? config.cookieJsonPath ?? join(home, "cookies", "chatgpt.json"),
-    cookieJarPath:
-      env.CHATGPT_COOKIE_JAR ?? config.cookieJarPath ?? join(home, "cookies", "chatgpt.txt"),
-    sessionTokenPath:
-      env.CHATGPT_SESSION_TOKEN_JSON ??
-      config.sessionTokenPath ??
-      join(home, "tokens", "chatgpt-session.json"),
+    cookieJsonPath: expandPath(cookieJsonPath),
+    cookieJarPath: expandPath(cookieJarPath),
+    sessionTokenPath: expandPath(sessionTokenPath),
     dbPath: join(home, "jobs.sqlite"),
   };
 }
@@ -88,7 +90,9 @@ export async function loadConfig(env: Record<string, string | undefined>): Promi
     const raw = await readFile(configPath, "utf8");
     return JSON.parse(raw) as ProConfig;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return {};
+    if (isPermissionError(error)) throw configAccessError("CONFIG_UNREADABLE", "read", configPath, error);
     throw error;
   }
 }
@@ -98,8 +102,14 @@ export async function saveConfig(
   config: ProConfig,
 ): Promise<void> {
   const home = resolveHome(env);
-  await ensurePrivateDir(home);
-  await writePrivateFile(join(home, "config.json"), `${JSON.stringify(config, null, 2)}\n`);
+  const configPath = join(home, "config.json");
+  try {
+    await ensurePrivateDir(home);
+    await writePrivateFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  } catch (error) {
+    if (isPermissionError(error)) throw configAccessError("CONFIG_UNWRITABLE", "write", configPath, error);
+    throw error;
+  }
 }
 
 export function expandPath(path: string): string {
@@ -141,4 +151,32 @@ function rewriteHomePrefix(path: string | undefined, fromHome: string, toHome: s
   if (path === fromHome) return toHome;
   const prefix = `${fromHome}/`;
   return path.startsWith(prefix) ? join(toHome, path.slice(prefix.length)) : path;
+}
+
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EACCES" || code === "EPERM";
+}
+
+function configAccessError(
+  code: "CONFIG_UNREADABLE" | "CONFIG_UNWRITABLE",
+  action: "read" | "write",
+  configPath: string,
+  error: unknown,
+): ProError {
+  const errno = (error as NodeJS.ErrnoException).code;
+  const syscall = (error as NodeJS.ErrnoException).syscall;
+  return new ProError(code, `Cannot ${action} pro-cli config at ${configPath}.`, {
+    exitCode: EXIT.auth,
+    suggestions: [
+      `Fix local ownership/permissions for ${configPath}, or set PRO_CLI_HOME to a writable pro-cli home.`,
+      "After fixing storage, run pro-cli doctor --json. Do not send probe or smoke-test queries; ask/job calls spend Pro quota.",
+    ],
+    details: {
+      configPath,
+      ...(errno ? { errno } : {}),
+      ...(syscall ? { syscall } : {}),
+    },
+    cause: error,
+  });
 }

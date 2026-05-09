@@ -1,15 +1,18 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
 import {
+  ensurePrivateDir,
   expandPath,
   loadConfig,
   migrateLegacyDefaultHome,
   resolveHome,
   resolvePaths,
   saveConfig,
+  writePrivateFile,
 } from "../src/config";
+import { ProError } from "../src/errors";
 
 describe("expandPath", () => {
   test("returns absolute path verbatim", () => {
@@ -58,13 +61,37 @@ describe("resolveHome", () => {
     expect(result.startsWith("/")).toBe(true);
   });
 
-  test("falls back to ~/.pro-cli when PRO_CLI_HOME is the empty string", () => {
-    // Catches a regression where `env.PRO_CLI_HOME ?? DEFAULT_HOME` was
-    // changed to `env.PRO_CLI_HOME || DEFAULT_HOME` (the spec needs ??).
-    // Currently ?? lets empty-string through, so empty string yields a
-    // resolve(""). Document that behavior.
+  test("treats empty PRO_CLI_HOME as missing", () => {
     const result = resolveHome({ PRO_CLI_HOME: "" });
-    expect(typeof result).toBe("string");
+    expect(result).toBe(resolveHome({}));
+    expect(result).toContain(".pro-cli");
+  });
+});
+
+describe("private filesystem helpers", () => {
+  test("ensurePrivateDir creates directories with private mode", async () => {
+    if (process.platform === "win32") return;
+    const dir = await mkdtemp(join(tmpdir(), "pro-private-dir-"));
+    try {
+      const privateDir = join(dir, "private");
+      await ensurePrivateDir(privateDir);
+      expect((await stat(privateDir)).mode & 0o777).toBe(0o700);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("writePrivateFile creates parent directory 0700 and file 0600", async () => {
+    if (process.platform === "win32") return;
+    const dir = await mkdtemp(join(tmpdir(), "pro-private-file-"));
+    try {
+      const file = join(dir, "nested", "secret.json");
+      await writePrivateFile(file, "{\"secret\":true}\n");
+      expect((await stat(join(dir, "nested"))).mode & 0o777).toBe(0o700);
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -90,6 +117,43 @@ describe("resolvePaths", () => {
   test("config-level cookie path overrides default when env is absent", () => {
     const paths = resolvePaths({ PRO_CLI_HOME: "/x/.pro-cli" }, { cookieJsonPath: "/config/cookies.json" });
     expect(paths.cookieJsonPath).toBe("/config/cookies.json");
+  });
+
+  test("expands env and config path overrides instead of storing raw shell-style paths", () => {
+    const paths = resolvePaths(
+      {
+        PRO_CLI_HOME: "/x/.pro-cli",
+        CHATGPT_COOKIE_JSON: "relative/cookies.json",
+        CHATGPT_COOKIE_JAR: "~/cookies/chatgpt.txt",
+      },
+      { sessionTokenPath: "relative/tokens/session.json" },
+    );
+
+    expect(paths.cookieJsonPath).toMatch(/\/relative\/cookies\.json$/);
+    expect(paths.cookieJsonPath.startsWith("/")).toBe(true);
+    expect(paths.cookieJarPath).not.toContain("~");
+    expect(paths.cookieJarPath.endsWith("/cookies/chatgpt.txt")).toBe(true);
+    expect(paths.sessionTokenPath).toMatch(/\/relative\/tokens\/session\.json$/);
+    expect(paths.sessionTokenPath.startsWith("/")).toBe(true);
+  });
+
+  test("ignores empty env override strings and falls back to config/default paths", () => {
+    const paths = resolvePaths(
+      {
+        PRO_CLI_HOME: "/x/.pro-cli",
+        CHATGPT_COOKIE_JSON: "",
+        CHATGPT_COOKIE_JAR: "",
+        CHATGPT_SESSION_TOKEN_JSON: "",
+      },
+      {
+        cookieJsonPath: "/config/cookies.json",
+        cookieJarPath: "/config/cookies.txt",
+      },
+    );
+
+    expect(paths.cookieJsonPath).toBe("/config/cookies.json");
+    expect(paths.cookieJarPath).toBe("/config/cookies.txt");
+    expect(paths.sessionTokenPath).toBe("/x/.pro-cli/tokens/chatgpt-session.json");
   });
 
   test("env-level cookie jar path overrides config and default", () => {
@@ -161,6 +225,32 @@ describe("loadConfig + saveConfig", () => {
       await writeFile(join(dir, "config.json"), "{ not json");
       await expect(loadConfig({ PRO_CLI_HOME: dir })).rejects.toThrow();
     } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("surfaces unreadable config as a first-class local storage error", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const dir = await mkdtemp(join(tmpdir(), "pro-config-"));
+    const configPath = join(dir, "config.json");
+    try {
+      await writeFile(configPath, "{}");
+      await chmod(configPath, 0);
+
+      try {
+        await loadConfig({ PRO_CLI_HOME: dir });
+        throw new Error("Expected CONFIG_UNREADABLE.");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProError);
+        const proError = error as ProError;
+        expect(proError.code).toBe("CONFIG_UNREADABLE");
+        expect(proError.message).toContain(configPath);
+        expect(proError.suggestions.join("\n")).toContain("pro-cli doctor --json");
+        expect(proError.suggestions.join("\n")).toContain("smoke-test");
+        expect(proError.details?.configPath).toBe(configPath);
+      }
+    } finally {
+      await chmod(configPath, 0o600).catch(() => undefined);
       await rm(dir, { recursive: true, force: true });
     }
   });

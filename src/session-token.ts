@@ -17,7 +17,7 @@ export function toSessionTokenExport(accessToken: string): SessionTokenExport {
     source: "pro-cli-cdp-page",
     accessToken,
     ...(accountIdFromToken(accessToken) ? { accountId: accountIdFromToken(accessToken) } : {}),
-    ...(expiresMs ? { expiresAt: new Date(expiresMs).toISOString() } : {}),
+    ...(expiresMs !== undefined ? { expiresAt: new Date(expiresMs).toISOString() } : {}),
   };
 }
 

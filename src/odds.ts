@@ -67,7 +67,7 @@ export function buildOddsPrompt(question: string, context?: string): string {
 }
 
 const STRICT_INTEGER = /^\s*(\d{1,3})\s*$/;
-const FIRST_INTEGER = /\b(\d{1,3})\b/;
+const FIRST_INTEGER = /(?:^|[^\w.-])(\d{1,3})(?!\w|[.]\d)/;
 
 export function parseOddsResponse(
   text: string,

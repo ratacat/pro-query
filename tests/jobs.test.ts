@@ -104,6 +104,27 @@ describe("job store: status transitions", () => {
     });
   });
 
+  test("markRunning does not revive terminal jobs", async () => {
+    await withStore(async (store) => {
+      const succeeded = store.create({ prompt: "a", model: "gpt-5-5-pro", reasoning: "standard", options: {} });
+      store.markRunning(succeeded.id);
+      store.markSucceeded(succeeded.id, "ok");
+
+      const failed = store.create({ prompt: "b", model: "gpt-5-5-pro", reasoning: "standard", options: {} });
+      store.markRunning(failed.id);
+      store.markFailed(failed.id, new ProError("BOOM", "failed"));
+
+      const cancelled = store.create({ prompt: "c", model: "gpt-5-5-pro", reasoning: "standard", options: {} });
+      store.cancel(cancelled.id);
+
+      expect(store.markRunning(succeeded.id).status).toBe("succeeded");
+      expect(store.markRunning(failed.id).status).toBe("failed");
+      expect(store.markRunning(cancelled.id).status).toBe("cancelled");
+      expect(store.get(succeeded.id).result).toBe("ok");
+      expect(JSON.parse(store.get(failed.id).error as string).code).toBe("BOOM");
+    });
+  });
+
   test("markSucceeded only writes when current status is running (regression: late success after cancel)", async () => {
     await withStore(async (store) => {
       const created = store.create({ prompt: "x", model: "gpt-5-5-pro", reasoning: "standard", options: {} });
@@ -372,6 +393,25 @@ describe("redactJob helper", () => {
     const redacted = redactJob(job);
     expect(redacted.hasResult).toBe(false);
     expect("resultPreview" in redacted).toBe(false);
+  });
+
+  test("treats an empty-string result as a real result", () => {
+    const job: JobRecord = {
+      id: "job_x",
+      status: "succeeded",
+      prompt: "p",
+      model: "gpt-5-5-pro",
+      reasoning: "standard",
+      options: {},
+      result: "",
+      error: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const redacted = redactJob(job);
+    expect(redacted.result).toBeNull();
+    expect(redacted.hasResult).toBe(true);
+    expect(redacted.resultPreview).toBe("");
   });
 
   test("truncates oversized previews with ellipsis", () => {

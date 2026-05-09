@@ -60,6 +60,7 @@ export async function executeEphemeralJob(
         updatedAt: new Date().toISOString(),
       }),
       error: proError.toPayload(),
+      exitCode: proError.exitCode,
     };
   }
 }

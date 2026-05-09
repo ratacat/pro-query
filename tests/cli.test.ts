@@ -1,5 +1,5 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runCli } from "../src/app";
@@ -114,11 +114,13 @@ describe("robot-mode CLI", () => {
         "install",
         "open-chatgpt",
         "capture-auth",
-        "smoke-test",
+        "doctor",
       ]);
       expect(payload.data.steps[1].command).toContain("chrome-profile");
       expect(payload.data.steps[2].command).toContain("pro-cli auth capture");
+      expect(payload.data.steps[3].command).toContain("pro-cli doctor");
       expect(payload.data.safety.rawValuesPrinted).toBe(false);
+      expect(JSON.stringify(payload.data)).not.toMatch(/Reply with OK|smoke-test/i);
     });
   });
 
@@ -130,6 +132,8 @@ describe("robot-mode CLI", () => {
       expect(result.stdout).toContain("pro-cli needs a logged-in ChatGPT browser session");
       expect(result.stdout).toContain("[todo] open-chatgpt");
       expect(result.stdout).toContain("pro-cli auth capture");
+      expect(result.stdout).toContain("pro-cli doctor");
+      expect(result.stdout).not.toMatch(/Reply with OK|smoke-test/i);
       expect(result.stdout).not.toContain("{\"ready\"");
     });
   });
@@ -229,11 +233,35 @@ describe("robot-mode CLI", () => {
     await withHome(async (home) => {
       const result = await run(["ask", "hello", "--json"], { tty: true, home });
 
-      expect(result.code).toBe(0);
-      const payload = JSON.parse(result.stdout);
-      expect(payload.data.job.status).toBe("failed");
-      expect(payload.data.error.code).toBe("SESSION_TOKEN_MISSING");
+      expect(result.code).toBe(3);
+      expect(result.stdout).toBe("");
+      const payload = JSON.parse(result.stderr);
+      expect(payload.ok).toBe(false);
+      expect(payload.error.code).toBe("SESSION_TOKEN_MISSING");
       await expect(access(join(home, "jobs.sqlite"))).rejects.toThrow();
+    });
+  });
+
+  test("config permission errors do not fall through to INTERNAL_ERROR", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    await withHome(async (home) => {
+      const configPath = join(home, "config.json");
+      await writeFile(configPath, "{}");
+      await chmod(configPath, 0);
+      try {
+        const result = await run(["doctor", "--json"], { tty: true, home });
+
+        expect(result.code).toBe(3);
+        expect(result.stdout).toBe("");
+        const payload = JSON.parse(result.stderr);
+        expect(payload.error.code).toBe("CONFIG_UNREADABLE");
+        expect(payload.error.message).toContain(configPath);
+        expect(payload.error.suggestions.join("\n")).toContain("pro-cli doctor --json");
+        expect(payload.error.suggestions.join("\n")).toContain("smoke-test");
+        expect(payload.error.suggestions.join("\n")).not.toContain("Run with --json");
+      } finally {
+        await chmod(configPath, 0o600).catch(() => undefined);
+      }
     });
   });
 
@@ -306,6 +334,7 @@ describe("robot-mode CLI", () => {
       const requestBody = requestBodyFromExpression(expression);
       expect(requestBody.model).toBe("gpt-5-5-pro");
       expect(requestBody.thinking_effort).toBe("extended");
+      expect(requestBody.verbosity).toBe("low");
       expect(requestBody.history_and_training_disabled).toBe(true);
       expect(requestBody).not.toHaveProperty("text");
     });
@@ -375,6 +404,20 @@ describe("robot-mode CLI", () => {
       const payload = JSON.parse(result.stderr);
       expect(payload.error.code).toBe("INVALID_ARGS");
       expect(payload.error.message).toContain("Invalid --model");
+    });
+  });
+
+  test("rejects repeated single-value request flags instead of falling back to defaults", async () => {
+    await withHome(async (home) => {
+      const result = await run(
+        ["ask", "hello", "--model", "gpt-a", "--model", "gpt-b", "--json"],
+        { tty: true, home },
+      );
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("Repeated --model");
     });
   });
 
@@ -595,6 +638,8 @@ describe("robot-mode CLI", () => {
       expect(payload.data.ready).toBe(true);
       expect(payload.data.transport.status).toBe("configured");
       expect(payload.data.next.command).toContain("--cdp http://127.0.0.1:9555");
+      expect(payload.data.next.command).not.toContain("Reply with OK");
+      expect(JSON.stringify(payload.data.next).toLowerCase()).not.toContain("smoke");
       expect(result.stdout).not.toContain("header.");
     });
   });
@@ -725,7 +770,11 @@ describe("robot-mode CLI", () => {
       // Pre-seed three older backups, then trigger a reset that creates a
       // fourth. With --keep-backups 2, the two oldest must be pruned.
       await mkdir(join(home, "chrome-profile", "Default"), { recursive: true });
-      const old = ["chrome-profile.backup-20260101-000000", "chrome-profile.backup-20260102-000000", "chrome-profile.backup-20260103-000000"];
+      const old = [
+        "chrome-profile.backup-20000101-000000",
+        "chrome-profile.backup-20000102-000000",
+        "chrome-profile.backup-20000103-000000",
+      ];
       for (const name of old) {
         await mkdir(join(home, name), { recursive: true });
         await writeFile(join(home, name, "marker"), name);
@@ -737,12 +786,16 @@ describe("robot-mode CLI", () => {
       );
       expect(result.code).toBe(0);
       const payload = JSON.parse(result.stdout);
-      // The new backup plus 2 kept = 3 surviving backups; 2 oldest pruned.
-      expect(payload.data.prunedBackups).toHaveLength(2);
+      const prunedNames = (payload.data.prunedBackups as string[]).map((path) => basename(path)).sort();
+      expect(prunedNames).toEqual([
+        "chrome-profile.backup-20000101-000000",
+        "chrome-profile.backup-20000102-000000",
+      ]);
       const remaining = (await listEntries(home)).filter((e) => e.startsWith("chrome-profile.backup-"));
-      expect(remaining).toHaveLength(2);
-      // The newest two timestamps survive.
-      expect(remaining.sort()).toContain("chrome-profile.backup-20260103-000000");
+      expect(remaining.sort()).toEqual([
+        basename(payload.data.removed.to as string),
+        "chrome-profile.backup-20000103-000000",
+      ].sort());
     });
   });
 

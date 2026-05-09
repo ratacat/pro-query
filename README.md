@@ -34,6 +34,14 @@ pro-cli update --json
 
 `update` verifies the checkout is `main` with the expected origin and no uncommitted changes, then runs `git pull --ff-only origin main`, `bun install`, and `bun link`.
 
+## Agent Instructions
+
+After installing, add a short `pro-cli` note to your user-level or project-level `AGENTS.md` or equivalent agent instructions file:
+
+```md
+Use `pro-cli` to answer real, user-driven questions or tasks that clearly benefit from ChatGPT Pro. Run `pro-cli --help` if you need the command list or are unsure which command shape to use. Avoid probe or smoke-test queries: do not call `pro-cli ask` for checks after errors or empty responses; use `pro-cli doctor --json` for health/setup validation because it does not consume Pro quota. Submit durable blocking tasks with `pro-cli job create @prompt.md --wait --json` or direct blocking requests with `pro-cli ask @prompt.md --json`, and never include secrets, raw cookies, tokens, `.env` files, or private keys.
+```
+
 ## Setup
 
 `pro-cli` needs one logged-in ChatGPT Chrome window. `pro-cli` manages its local job daemon; you manage the browser login.
@@ -87,14 +95,6 @@ When unsure, run:
 
 ```sh
 pro-cli doctor --json
-```
-
-## Agent Instruction
-
-Put this in a user-level or project-level agent instructions file:
-
-```md
-Use `pro-cli` to ask my ChatGPT Pro web account for hard questions, Pro thinking, Deep Research, or current model/tool capabilities. Prefer JSON and async jobs: `pro-cli job create @prompt.md --wait --json` for a blocking durable query, or `pro-cli job create @prompt.md --json`, `pro-cli job wait <job-id> --json`, and `pro-cli job result <job-id> --json` when you need separate steps. `pro-cli` defaults to `gpt-5-5-pro` with `standard` reasoning; pass `--reasoning extended` only when the prompt needs deeper Pro reasoning. `job create` and `job wait` manage the local daemon. When JSON output includes `data.result`, follow `data.agentInstruction`: preserve Pro's answer as the primary deliverable, relaying short results in full and condensing long results only with care for Pro's prose, structure, and voice. Do not add `--wait-timeout` unless you need a hard local command budget; a timeout means the job is still running, not failed. For a direct blocking query, use `pro-cli ask @prompt.md --json`. Do not send probe or smoke-test queries (e.g., "reply with OK") to verify pro-cli is working; send the real request directly. Every call consumes my Pro quota. Run `pro-cli doctor --json` to check health without spending a Pro call; only run a real query as a connectivity test if I explicitly ask. `pro-cli` requires the dedicated ChatGPT Chrome/CDP window to stay open; run `pro-cli doctor --json` first if unsure. If auth or the live browser is missing, run `pro-cli setup --json` and follow the returned commands. Never print, paste, or commit `~/.pro-cli`.
 ```
 
 ## Commands

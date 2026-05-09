@@ -93,16 +93,26 @@ export function buildStructuredInstructions(schema: unknown, formatHint?: string
 }
 
 export function extractJsonFromResponse(text: string): unknown {
-  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  let candidate: string;
-  if (fenceMatch) {
-    candidate = fenceMatch[1].trim();
-  } else {
-    const start = findFirstJsonStart(text);
-    if (start === -1) throw new Error("No JSON object or array found in response.");
-    candidate = extractBalanced(text, start);
+  const fence = firstJsonFence(text);
+  if (fence !== null) return JSON.parse(fence);
+
+  const start = findFirstJsonStart(text);
+  if (start === -1) throw new Error("No JSON object or array found in response.");
+  return JSON.parse(extractBalanced(text, start));
+}
+
+function firstJsonFence(text: string): string | null {
+  const fencePattern = /```([^\n\r`]*)\r?\n?([\s\S]*?)```/g;
+  let unlabeled: string | null = null;
+  for (const match of text.matchAll(fencePattern)) {
+    const language = (match[1] ?? "").trim().toLowerCase();
+    const candidate = (match[2] ?? "").trim();
+    if (language === "json") return candidate;
+    if (!language && unlabeled === null) {
+      unlabeled = candidate;
+    }
   }
-  return JSON.parse(candidate);
+  return unlabeled;
 }
 
 function findFirstJsonStart(text: string): number {

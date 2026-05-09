@@ -58,6 +58,20 @@ describe("ChatGPT transport", () => {
       expect(expression).toContain('"history_and_training_disabled":true');
       expect(expression).toContain("Use terse answers.\\n\\nReply with OK only.");
       expect(expression).not.toContain("header.");
+      const requestBody = requestBodyFromExpression(expression);
+      expect(requestBody).toMatchObject({
+        action: "next",
+        model: "gpt-5-5-pro",
+        thinking_effort: "standard",
+        history_and_training_disabled: true,
+        verbosity: "high",
+        reasoning_summary: "detailed",
+        tool_choice: "none",
+        parallel_tools: false,
+        force_parallel_switch: "none",
+      });
+      const messages = requestBody.messages as Array<{ content: { parts: string[] } }>;
+      expect(messages[0].content.parts[0]).toBe("Use terse answers.\n\nReply with OK only.");
     });
   });
 
@@ -125,6 +139,71 @@ describe("ChatGPT transport", () => {
       const result = await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
 
       expect(result).toBe("OK");
+    });
+  });
+
+  test("reads CRLF-delimited SSE frames from upstream streams", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: conversationStream("OK").replace(/\n/g, "\r\n"),
+        }) as T);
+
+      const result = await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+
+      expect(result).toBe("OK");
+    });
+  });
+
+  test("surfaces upstream error events instead of treating DONE as success", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: [
+            'data: {"type":"error","error":{"message":"usage limit reached"}}',
+            "data: [DONE]",
+            "",
+          ].join("\n\n"),
+        }) as T);
+
+      try {
+        await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+        throw new Error("Expected UPSTREAM_ERROR.");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProError);
+        const proError = error as ProError;
+        expect(proError.code).toBe("UPSTREAM_ERROR");
+        expect(proError.message).toBe("usage limit reached");
+        expect(proError.details?.attempts).toBe(1);
+      }
+    });
+  });
+
+  test("empty completed responses tell agents not to spend quota on probes", async () => {
+    await withTokenFile(async (sessionTokenPath) => {
+      const pageEvaluator = (async <T>(): Promise<T> =>
+        ({
+          ok: true,
+          status: 200,
+          body: ["data: [DONE]", ""].join("\n\n"),
+        }) as T);
+
+      try {
+        await runChatGptJob(job(), { sessionTokenPath, pageEvaluator });
+        throw new Error("Expected EMPTY_RESPONSE.");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProError);
+        const proError = error as ProError;
+        const suggestions = proError.suggestions.join("\n").toLowerCase();
+        expect(proError.code).toBe("EMPTY_RESPONSE");
+        expect(suggestions).toContain("same real request");
+        expect(suggestions).toContain("smoke-test");
+        expect(suggestions).toContain("pro-cli doctor --json");
+      }
     });
   });
 
@@ -507,4 +586,14 @@ function conversationStream(text: string): string {
     "data: [DONE]",
     "",
   ].join("\n\n");
+}
+
+function requestBodyFromExpression(expression: string): Record<string, unknown> {
+  const marker = '})("https://chatgpt.com/backend-api/f/conversation", ';
+  const start = expression.lastIndexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const bodyStart = start + marker.length;
+  const bodyEnd = expression.lastIndexOf(', "acct_test")');
+  expect(bodyEnd).toBeGreaterThan(bodyStart);
+  return JSON.parse(expression.slice(bodyStart, bodyEnd)) as Record<string, unknown>;
 }

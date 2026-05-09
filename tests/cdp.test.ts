@@ -259,6 +259,36 @@ describe("CDP helpers", () => {
     expect(deleted).toEqual([{ name: "conv_key_chatgpt", domain: "chatgpt.com", path: "/" }]);
   });
 
+  test("cookie URL filtering respects path segment boundaries", async () => {
+    installFakeCdp({
+      pageTargets: [],
+      onCommand(method) {
+        if (method === "Network.getCookies") {
+          return {
+            result: {
+              cookies: [
+                { ...cookie("root", "chatgpt.com"), path: "/" },
+                { ...cookie("backend-api", "chatgpt.com"), path: "/backend-api" },
+                { ...cookie("too-broad", "chatgpt.com"), path: "/backend" },
+                { ...cookie("wrong-sibling", "chatgpt.com"), path: "/backend-api-v2" },
+              ],
+            },
+          };
+        }
+        return { result: {} };
+      },
+    });
+
+    const cookies = await getCookiesFromCdp("http://127.0.0.1:9222", [
+      "https://chatgpt.com/backend-api/f/conversation",
+    ]);
+
+    expect(cookies.map((stored) => `${stored.name}:${stored.path}`).sort()).toEqual([
+      "backend-api:/backend-api",
+      "root:/",
+    ]);
+  });
+
   test("findChatGptTargetId returns the id of a chatgpt.com page target", async () => {
     installFakeCdp({
       pageTargets: [

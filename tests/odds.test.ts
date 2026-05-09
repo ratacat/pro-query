@@ -43,17 +43,16 @@ describe("parseOddsResponse", () => {
     expect(parseOddsResponse("100", false).value).toBe(100);
   });
 
-  test("rejects negative integers (the negative sign is part of the digit run)", () => {
-    // The first-integer regex matches \b\d+, so -73 yields 73 from the loose
-    // path. Verify current behavior so a future tightening (which would be
-    // safer) is intentional, not accidental.
-    expect(parseOddsResponse("-73", false).value).toBe(73);
+  test("rejects negative integers instead of stripping the sign", () => {
+    const r = parseOddsResponse("-73", false);
+    expect(r.value).toBe(null);
+    expect(r.rejectedFifty).toBe(false);
   });
 
-  test("falls back to first integer when prose contains a float (truncates at the dot)", () => {
-    // Document current behavior: "73.5" matches 73 from the loose path
-    // because the regex stops at the dot.
-    expect(parseOddsResponse("My estimate: 73.5%", false).value).toBe(73);
+  test("rejects decimal probabilities instead of truncating at the dot", () => {
+    const r = parseOddsResponse("My estimate: 73.5%", false);
+    expect(r.value).toBe(null);
+    expect(r.rejectedFifty).toBe(false);
   });
 
   test("picks the FIRST integer when noisy text has multiple candidates", () => {

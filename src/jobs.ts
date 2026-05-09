@@ -157,7 +157,10 @@ export class JobStore {
   }
 
   markRunning(id: string): JobRecord {
-    this.update(id, { status: "running" });
+    const now = new Date().toISOString();
+    this.db
+      .query("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+      .run("running", now, id, "queued");
     return this.get(id);
   }
 
@@ -281,8 +284,8 @@ export function redactJob(
     prompt: "",
     result: null,
     promptPreview: compact(job.prompt, 160),
-    ...(job.result ? { resultPreview: compact(job.result, 240) } : {}),
-    hasResult: Boolean(job.result),
+    ...(job.result !== null ? { resultPreview: compact(job.result, 240) } : {}),
+    hasResult: job.result !== null,
   };
 }
 
