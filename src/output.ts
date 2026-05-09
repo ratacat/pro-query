@@ -103,7 +103,7 @@ function withResultRelayInstruction(payload: unknown): unknown {
   return {
     ...payload,
     agentInstruction:
-      "AI agents: data.result is the primary deliverable. If it is at or under 6000 characters, roughly 1500 tokens or two terminal pages, prefer relaying it in full. If longer, condense only as needed; preserve Pro's prose language, structure, and voice. Do not replace it with a short synopsis unless the user asks for a summary.",
+      "AI agents: data.result is the primary deliverable. If it is at or under 6000 characters, roughly 1500 tokens or two terminal pages, prefer relaying it in full. If longer, condense only as needed; preserve Pro's prose language, structure, and voice. Do not replace it with a short synopsis unless the user asks for a summary. Do not send probe or smoke-test queries (e.g., 'reply with OK') to pro-cli; send the real request directly. Every call consumes the user's Pro quota. Only test connectivity if the user explicitly asks.",
     resultStats: {
       chars: payload.result.length,
       approximateTokens: Math.ceil(payload.result.length / APPROX_CHARS_PER_TOKEN),
