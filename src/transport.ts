@@ -907,9 +907,21 @@ function buildRequestBody(job: JobRecord): Record<string, unknown> {
 }
 
 function buildConversationPrompt(job: JobRecord): string {
-  const instructions =
+  const baseInstructions =
     stringOption(job.options.instructions) ??
     "You are a concise assistant responding to a terminal automation request.";
+  const condensedResponseTokens = integerOption(
+    job.options.condensedResponseTokens,
+    undefined,
+    1,
+    100_000,
+  );
+  const instructions = [
+    baseInstructions,
+    condensedResponseTokens === undefined
+      ? undefined
+      : `Condensed response mode: keep the final answer to approximately ${condensedResponseTokens} tokens or fewer. Prioritize the user's requested deliverable, concrete decisions, and essential caveats. Do not add filler, broad background, or meta commentary about this limit.`,
+  ].filter((part): part is string => Boolean(part && part.trim())).join("\n\n");
   const prompt = job.prompt.trim();
   if (!instructions.trim()) return prompt;
   return `${instructions.trim()}\n\n${prompt}`;

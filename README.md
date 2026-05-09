@@ -126,6 +126,7 @@ Async jobs:
 pro-cli job create @prompt.md --json
 pro-cli job create @prompt.md --wait --json
 pro-cli job create @prompt.md --reasoning extended --json
+pro-cli job create @prompt.md --condensed-response 500 --json
 pro-cli job wait <job-id> --json
 pro-cli job wait <job-id> --soft-timeout 60000 --json
 pro-cli job result <job-id> --json
@@ -148,9 +149,12 @@ Direct ask:
 ```sh
 pro-cli ask @prompt.md --json
 pro-cli ask @prompt.md --reasoning extended --json
+pro-cli ask @prompt.md --condensed_response=500 --json
 ```
 
 `ask` executes without creating durable job state. Use `job create` when you need a job id that later `job wait`, `job result`, `job cancel`, or `job list` can inspect.
+
+Use `--condensed-response <tokens>` when Pro should keep the final answer within an approximate response budget. The underscore alias `--condensed_response=<tokens>` is also accepted for agents. This is a prompt-level instruction, not a second summarization call, so it does not spend extra Pro quota.
 
 JSON responses that include full Pro text also include `agentInstruction` and `resultStats`. Agents should treat `data.result` as the primary deliverable. Results under 6000 characters should usually be relayed in full; longer results may be condensed with care for the original prose, structure, and voice.
 

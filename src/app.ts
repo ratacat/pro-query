@@ -680,6 +680,15 @@ async function collectRequestOptions(
   setIntegerOption(options, "timeoutMs", flags, "timeout", 1, 30 * 60_000);
   setIntegerOption(options, "retries", flags, "retries", 0, 5);
   setIntegerOption(options, "retryDelayMs", flags, "retry-delay", 0, 60_000);
+  setIntegerAliasOption(
+    options,
+    "condensedResponseTokens",
+    flags,
+    "condensed-response",
+    ["condensed_response"],
+    1,
+    100_000,
+  );
   setBooleanOption(options, "parallelTools", flags, "parallel-tools");
   setConversationOptions(options, flags);
   const cdp = flagString(flags, "cdp");
@@ -714,6 +723,8 @@ const ASK_REQUEST_FLAGS = new Set([
   "timeout",
   "retries",
   "retry-delay",
+  "condensed-response",
+  "condensed_response",
   "store",
   "save",
   "temporary",
@@ -860,6 +871,35 @@ function setIntegerOption(
   const number = Number(value);
   if (!Number.isInteger(number) || number < min || number > max) {
     throw invalidArgs(`Invalid --${source}.`, [`Use an integer between ${min} and ${max}.`]);
+  }
+  options[target] = number;
+}
+
+function setIntegerAliasOption(
+  options: Record<string, unknown>,
+  target: string,
+  flags: Map<string, string | boolean | string[]>,
+  primary: string,
+  aliases: string[],
+  min: number,
+  max: number,
+): void {
+  const names = [primary, ...aliases];
+  const present = names
+    .map((name) => ({ name, value: flagString(flags, name) }))
+    .filter((entry): entry is { name: string; value: string } => entry.value !== undefined);
+  if (present.length === 0) return;
+  const first = present[0];
+  for (const entry of present.slice(1)) {
+    if (entry.value !== first.value) {
+      throw invalidArgs("Use only one condensed response flag.", [
+        `Pass --${primary} <tokens> or --${aliases[0]}=<tokens>, not both.`,
+      ]);
+    }
+  }
+  const number = Number(first.value);
+  if (!Number.isInteger(number) || number < min || number > max) {
+    throw invalidArgs(`Invalid --${first.name}.`, [`Use an integer between ${min} and ${max}.`]);
   }
   options[target] = number;
 }

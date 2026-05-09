@@ -200,10 +200,13 @@ describe("robot-mode CLI", () => {
 
   test("creates durable async jobs with redacted prompt preview", async () => {
     await withHome(async (home) => {
-      const createdResult = await run(["job", "create", "hello", "from", "agent", "--no-start", "--json"], {
-        tty: true,
-        home,
-      });
+      const createdResult = await run(
+        ["job", "create", "hello", "from", "agent", "--no-start", "--condensed-response", "250", "--json"],
+        {
+          tty: true,
+          home,
+        },
+      );
 
       expect(createdResult.code).toBe(0);
       const created = JSON.parse(createdResult.stdout);
@@ -214,6 +217,7 @@ describe("robot-mode CLI", () => {
       expect(created.data.daemon.started).toBe(false);
       expect(created.data.job.prompt).toBe("");
       expect(created.data.job.promptPreview).toBe("hello from agent");
+      expect(created.data.job.options.condensedResponseTokens).toBe(250);
 
       const status = await run(["job", "status", jobId, "--json"], { tty: true, home });
       expect(status.code).toBe(0);
@@ -304,6 +308,45 @@ describe("robot-mode CLI", () => {
       expect(requestBody.thinking_effort).toBe("extended");
       expect(requestBody.history_and_training_disabled).toBe(true);
       expect(requestBody).not.toHaveProperty("text");
+    });
+  });
+
+  test("ask supports condensed_response token budget alias", async () => {
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      let expression = "";
+      installFakeCdp(conversationStream("Short answer."), (script) => {
+        expression = script;
+      });
+
+      const result = await run(["ask", "explain this", "--json", "--condensed_response=500"], {
+        tty: true,
+        home,
+      });
+
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.job.options.condensedResponseTokens).toBe(500);
+      const requestBody = requestBodyFromExpression(expression);
+      const messages = requestBody.messages as Array<{ content: { parts: string[] } }>;
+      const prompt = messages[0].content.parts[0];
+      expect(prompt).toContain("Condensed response mode");
+      expect(prompt).toContain("approximately 500 tokens or fewer");
+      expect(prompt).toContain("explain this");
+    });
+  });
+
+  test("rejects conflicting condensed response aliases", async () => {
+    await withHome(async (home) => {
+      const result = await run(
+        ["ask", "hello", "--condensed-response", "250", "--condensed_response=500", "--json"],
+        { tty: true, home },
+      );
+
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      expect(payload.error.message).toContain("one condensed response flag");
     });
   });
 
