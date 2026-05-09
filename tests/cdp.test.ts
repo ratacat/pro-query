@@ -231,7 +231,7 @@ describe("CDP helpers", () => {
   test("pruneVolatileCookiesFromCdp filters out cookies on non-target domains before deleting", async () => {
     // The URL filter (cookieAppliesToUrl) must drop unrelated cookies so we
     // never delete cookies for sites we don't own.
-    const deleted: Array<{ name?: string; domain?: string }> = [];
+    const deleted: Array<{ name?: string; domain?: string; path?: string }> = [];
     installFakeCdp({
       pageTargets: [{ type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://fake-page" }],
       onCommand(method, params) {

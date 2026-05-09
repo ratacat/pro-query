@@ -88,7 +88,7 @@ export class JobStore {
     return new JobStore(db);
   }
 
-  create(input: CreateJobInput): JobRecord {
+  create(input: CreateJobInput): ReturnType<typeof redactJob> {
     const now = new Date().toISOString();
     const job: JobRecord = {
       id: `job_${randomUUID()}`,

@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -598,7 +598,296 @@ describe("robot-mode CLI", () => {
       expect(result.stdout).not.toContain("header.");
     });
   });
+
+  test("doctor reports probe_failed (NOT logged_out) when the probe returns a non-200/401 status", async () => {
+    // Regression guard: before the probe_failed split, HTTP 431 was
+    // collapsed into logged_out, sending users down the wrong remediation.
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      installFakeCdpValue({
+        status: 431,
+        hasAccessToken: false,
+        origin: "https://chatgpt.com",
+      });
+
+      const result = await run(["doctor", "--json", "--timeout", "1000"], { tty: true, home });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.browserSession.status).toBe("probe_failed");
+      expect(payload.data.browserSession.httpStatus).toBe(431);
+      // The 431-specific suggestion mentions cookies (not "sign in again").
+      expect(
+        payload.data.browserSession.suggestions.some((s: string) =>
+          s.toLowerCase().includes("cookie"),
+        ),
+      ).toBe(true);
+      // doctor.next still points at auth capture as the recovery action.
+      expect(payload.data.next.command).toContain("pro-cli auth capture");
+    });
+  });
+
+  test("doctor includes portCollision and legacyArtifacts diagnostic fields", async () => {
+    // These fields were added to surface the failure modes that caused
+    // today's incident. They must appear in every doctor report so agents
+    // can act on them without guessing.
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      installFakeCdpValue({ status: 200, hasAccessToken: true, origin: "https://chatgpt.com" });
+      const result = await run(["doctor", "--json", "--cdp", "http://127.0.0.1:65432"], {
+        tty: true,
+        home,
+      });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+
+      expect(payload.data.portCollision).toBeDefined();
+      expect(typeof payload.data.portCollision.inUse).toBe("boolean");
+      expect(typeof payload.data.portCollision.conflict).toBe("boolean");
+      expect(Array.isArray(payload.data.portCollision.listeners)).toBe(true);
+      expect(payload.data.portCollision.port).toBe("65432");
+
+      expect(payload.data.legacyArtifacts).toBeDefined();
+      expect(typeof payload.data.legacyArtifacts.legacyHomeExists).toBe("boolean");
+      expect(typeof payload.data.legacyArtifacts.legacyProfileExists).toBe("boolean");
+      expect(typeof payload.data.legacyArtifacts.legacyHome).toBe("string");
+      expect(typeof payload.data.legacyArtifacts.legacyProfileDir).toBe("string");
+    });
+  });
+
+  test("auth command output includes portCollision so agents can detect dual-Chrome races", async () => {
+    await withHome(async (home) => {
+      const result = await run(["auth", "command", "--port", "9444", "--json"], {
+        tty: true,
+        home,
+      });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.portCollision).toBeDefined();
+      expect(payload.data.portCollision.port).toBe("9444");
+      expect(payload.data.profileDir).toContain("chrome-profile");
+    });
+  });
+
+  test("auth reset --no-launch --no-backup deletes the chrome profile dir", async () => {
+    // Regression guard: --no-backup must actually delete the profile, not
+    // silently fall through to backup mode (would mask "delete" intent).
+    await withHome(async (home) => {
+      await mkdir(join(home, "chrome-profile", "Default"), { recursive: true });
+      await writeFile(join(home, "chrome-profile", "Default", "Cookies"), "dummy");
+
+      const result = await run(["auth", "reset", "--no-launch", "--no-backup", "--json"], {
+        tty: true,
+        home,
+      });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.removed.mode).toBe("delete");
+      expect(payload.data.removed.from).toBe(join(home, "chrome-profile"));
+      expect(payload.data.launched).toBeNull();
+      // The profile dir is gone, no backup created.
+      const remaining = await listEntries(home);
+      expect(remaining).not.toContain("chrome-profile");
+      expect(remaining.filter((e) => e.startsWith("chrome-profile.backup-"))).toHaveLength(0);
+    });
+  });
+
+  test("auth reset (default) backs up the profile dir to chrome-profile.backup-<ts>", async () => {
+    await withHome(async (home) => {
+      await mkdir(join(home, "chrome-profile", "Default"), { recursive: true });
+      await writeFile(join(home, "chrome-profile", "Default", "marker"), "preserve me");
+
+      const result = await run(["auth", "reset", "--no-launch", "--json"], { tty: true, home });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.removed.mode).toBe("backup");
+      expect(payload.data.removed.to).toMatch(/chrome-profile\.backup-\d{8}-\d{6}/);
+      // Backup contents preserved.
+      const preserved = await readFile(
+        join(payload.data.removed.to, "Default", "marker"),
+        "utf8",
+      );
+      expect(preserved).toBe("preserve me");
+    });
+  });
+
+  test("auth reset reports mode=missing and does not crash when no profile exists", async () => {
+    await withHome(async (home) => {
+      const result = await run(["auth", "reset", "--no-launch", "--json"], { tty: true, home });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.removed.mode).toBe("missing");
+      expect(payload.data.killedPids).toEqual([]);
+    });
+  });
+
+  test("auth reset --keep-backups N prunes older backups beyond N", async () => {
+    await withHome(async (home) => {
+      // Pre-seed three older backups, then trigger a reset that creates a
+      // fourth. With --keep-backups 2, the two oldest must be pruned.
+      await mkdir(join(home, "chrome-profile", "Default"), { recursive: true });
+      const old = ["chrome-profile.backup-20260101-000000", "chrome-profile.backup-20260102-000000", "chrome-profile.backup-20260103-000000"];
+      for (const name of old) {
+        await mkdir(join(home, name), { recursive: true });
+        await writeFile(join(home, name, "marker"), name);
+      }
+
+      const result = await run(
+        ["auth", "reset", "--no-launch", "--keep-backups", "2", "--json"],
+        { tty: true, home },
+      );
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      // The new backup plus 2 kept = 3 surviving backups; 2 oldest pruned.
+      expect(payload.data.prunedBackups).toHaveLength(2);
+      const remaining = (await listEntries(home)).filter((e) => e.startsWith("chrome-profile.backup-"));
+      expect(remaining).toHaveLength(2);
+      // The newest two timestamps survive.
+      expect(remaining.sort()).toContain("chrome-profile.backup-20260103-000000");
+    });
+  });
+
+  test("auth hide moves the chatgpt window off-screen via Browser.setWindowBounds", async () => {
+    await withHome(async (home) => {
+      const observed = installAuthHideShowCdp();
+
+      const result = await run(["auth", "hide", "--json"], { tty: true, home });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.targetId).toBe("CHATGPT_TAB");
+      expect(payload.data.windowId).toBe(771965498);
+      expect(payload.data.after.left).toBe(-32000);
+      expect(payload.data.after.top).toBe(-32000);
+      expect(payload.data.note.toLowerCase()).toContain("off-screen");
+      // CDP methods called in order: get window, then set bounds.
+      expect(observed.methods).toEqual([
+        "Browser.getWindowForTarget",
+        "Browser.setWindowBounds",
+      ]);
+      // The setWindowBounds params include the off-screen coords.
+      const setParams = observed.params[1] as { bounds: { left: number; top: number } };
+      expect(setParams.bounds.left).toBe(-32000);
+      expect(setParams.bounds.top).toBe(-32000);
+    });
+  });
+
+  test("auth show restores the window to a sensible centered position", async () => {
+    await withHome(async (home) => {
+      const observed = installAuthHideShowCdp();
+
+      const result = await run(["auth", "show", "--json"], { tty: true, home });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.data.after.left).toBe(100);
+      expect(payload.data.after.top).toBe(100);
+      expect(payload.data.after.width).toBeGreaterThan(0);
+      expect(payload.data.after.height).toBeGreaterThan(0);
+      expect(payload.data.note.toLowerCase()).toContain("restored");
+
+      const setParams = observed.params[1] as { bounds: { left: number; top: number } };
+      expect(setParams.bounds.left).toBe(100);
+      expect(setParams.bounds.top).toBe(100);
+    });
+  });
+
+  test("auth hide fails clearly when no chatgpt.com tab is available", async () => {
+    await withHome(async (home) => {
+      // CDP is reachable but there is no chatgpt.com tab to operate on.
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        const target = String(url);
+        if (target.endsWith("/json")) {
+          return Response.json([
+            { id: "OTHER", type: "page", url: "https://example.com/", webSocketDebuggerUrl: "ws://other" },
+          ]);
+        }
+        if (target.endsWith("/json/version")) {
+          return Response.json({ webSocketDebuggerUrl: "ws://browser" });
+        }
+        return new Response("nope", { status: 500 });
+      }) as unknown as typeof fetch;
+
+      const result = await run(["auth", "hide", "--json"], { tty: true, home });
+      expect(result.code).toBe(3); // EXIT.auth
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("CHATGPT_PAGE_MISSING");
+    });
+  });
+
+  test("ask response includes the no-probe agent guidance (regression guard)", async () => {
+    // A future refactor that drops the no-test-probe sentence would let
+    // agents resume running smoke-tests against Pro and burning quota.
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      installFakeCdp(conversationStream("Real answer."));
+      const result = await run(["ask", "explain X", "--json"], { tty: true, home });
+      expect(result.code).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      const instruction = String(payload.data.agentInstruction).toLowerCase();
+      expect(instruction).toContain("probe");
+      expect(instruction).toContain("pro quota");
+    });
+  });
+
+  test("unknown auth subcommand suggests the full subcommand list (status/command/capture/reset/hide/show)", async () => {
+    await withHome(async (home) => {
+      const result = await run(["auth", "bogus", "--json"], { tty: true, home });
+      expect(result.code).toBe(2);
+      const payload = JSON.parse(result.stderr);
+      expect(payload.error.code).toBe("INVALID_ARGS");
+      const suggestion = (payload.error.suggestions[0] as string).toLowerCase();
+      expect(suggestion).toContain("status");
+      expect(suggestion).toContain("capture");
+      expect(suggestion).toContain("reset");
+      expect(suggestion).toContain("hide");
+      expect(suggestion).toContain("show");
+    });
+  });
 });
+
+async function listEntries(dir: string): Promise<string[]> {
+  const { readdir } = await import("node:fs/promises");
+  return readdir(dir).catch(() => [] as string[]);
+}
+
+function installAuthHideShowCdp(): { methods: string[]; params: Array<unknown> } {
+  const observed = { methods: [] as string[], params: [] as unknown[] };
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const target = String(url);
+    if (target.endsWith("/json")) {
+      return Response.json([
+        { id: "CHATGPT_TAB", type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://chatgpt-tab" },
+      ]);
+    }
+    if (target.endsWith("/json/version")) {
+      return Response.json({ webSocketDebuggerUrl: "ws://browser" });
+    }
+    return new Response("nope", { status: 500 });
+  }) as unknown as typeof fetch;
+
+  class FakeWebSocket extends EventTarget {
+    constructor(_url: string) {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send(raw: string): void {
+      const message = JSON.parse(raw) as { id: number; method: string; params?: unknown };
+      observed.methods.push(message.method);
+      observed.params.push(message.params);
+      let result: unknown = {};
+      if (message.method === "Browser.getWindowForTarget") {
+        result = { windowId: 771965498, bounds: { left: 22, top: 47, width: 1200, height: 1011, windowState: "normal" } };
+      }
+      const response = { id: message.id, result };
+      queueMicrotask(() =>
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(response) })),
+      );
+    }
+    close(): void {
+      this.dispatchEvent(new Event("close"));
+    }
+  }
+  globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  return observed;
+}
 
 async function writeSessionToken(home: string): Promise<void> {
   await mkdir(join(home, "tokens"), { recursive: true });
