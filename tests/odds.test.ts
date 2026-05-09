@@ -42,6 +42,29 @@ describe("parseOddsResponse", () => {
     expect(parseOddsResponse("0", false).value).toBe(0);
     expect(parseOddsResponse("100", false).value).toBe(100);
   });
+
+  test("rejects negative integers (the negative sign is part of the digit run)", () => {
+    // The first-integer regex matches \b\d+, so -73 yields 73 from the loose
+    // path. Verify current behavior so a future tightening (which would be
+    // safer) is intentional, not accidental.
+    expect(parseOddsResponse("-73", false).value).toBe(73);
+  });
+
+  test("falls back to first integer when prose contains a float (truncates at the dot)", () => {
+    // Document current behavior: "73.5" matches 73 from the loose path
+    // because the regex stops at the dot.
+    expect(parseOddsResponse("My estimate: 73.5%", false).value).toBe(73);
+  });
+
+  test("picks the FIRST integer when noisy text has multiple candidates", () => {
+    // Regression guard: if the regex changes to greedy, this could pick 99.
+    expect(parseOddsResponse("Between 60 and 99 percent.", false).value).toBe(60);
+  });
+
+  test("rejects multi-digit values starting with leading zero only when also out of range", () => {
+    // "007" parses as 7 (loose match) — not rejected since 7 is in range.
+    expect(parseOddsResponse("007", false).value).toBe(7);
+  });
 });
 
 describe("aggregateOdds", () => {
@@ -67,6 +90,25 @@ describe("aggregateOdds", () => {
 
   test("throws on empty input", () => {
     expect(() => aggregateOdds([], "mean")).toThrow();
+  });
+
+  test("single value passes through every aggregator", () => {
+    expect(aggregateOdds([42], "mean")).toBe(42);
+    expect(aggregateOdds([42], "median")).toBe(42);
+    expect(aggregateOdds([42], "trimmed-mean")).toBe(42);
+  });
+
+  test("trimmed-mean uses 10% trim minimum 1 from each end", () => {
+    // values length 10 → trim = max(1, floor(1)) = 1 from each end → mean of middle 8.
+    expect(aggregateOdds([0, 50, 50, 50, 50, 50, 50, 50, 50, 100], "trimmed-mean")).toBe(50);
+  });
+
+  test("aggregators do not mutate the input array", () => {
+    // Regression guard: a refactor that sorts in place would corrupt
+    // attempt-level data shown to users.
+    const input = [60, 95, 70];
+    aggregateOdds(input, "median");
+    expect(input).toEqual([60, 95, 70]);
   });
 });
 

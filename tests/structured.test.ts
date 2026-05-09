@@ -72,6 +72,111 @@ describe("validateLightly", () => {
     expect(validateLightly(3.5, { type: "integer" }).ok).toBe(false);
     expect(validateLightly(3, { type: "integer" }).ok).toBe(true);
   });
+
+  test("type=array passes only arrays", () => {
+    expect(validateLightly([1, 2], { type: "array" }).ok).toBe(true);
+    expect(validateLightly({}, { type: "array" }).ok).toBe(false);
+    expect(validateLightly("abc", { type: "array" }).ok).toBe(false);
+  });
+
+  test("type=string passes only strings", () => {
+    expect(validateLightly("ok", { type: "string" }).ok).toBe(true);
+    expect(validateLightly(0, { type: "string" }).ok).toBe(false);
+    expect(validateLightly(null, { type: "string" }).ok).toBe(false);
+  });
+
+  test("type=number passes both ints and floats", () => {
+    expect(validateLightly(3, { type: "number" }).ok).toBe(true);
+    expect(validateLightly(3.5, { type: "number" }).ok).toBe(true);
+    expect(validateLightly("3", { type: "number" }).ok).toBe(false);
+  });
+
+  test("type=boolean passes only booleans", () => {
+    expect(validateLightly(true, { type: "boolean" }).ok).toBe(true);
+    expect(validateLightly(false, { type: "boolean" }).ok).toBe(true);
+    expect(validateLightly(0, { type: "boolean" }).ok).toBe(false);
+    expect(validateLightly("true", { type: "boolean" }).ok).toBe(false);
+  });
+
+  test("required-field check is skipped when type is not 'object' (no spurious errors)", () => {
+    // Regression guard: required only applies to type=object roots; the
+    // implementation explicitly checks both before iterating.
+    expect(
+      validateLightly([1, 2, 3], { type: "array", required: ["name"] }).ok,
+    ).toBe(true);
+  });
+});
+
+describe("extractJsonFromResponse: nested and tricky inputs", () => {
+  test("extracts a deeply nested object", () => {
+    const text = '```json\n{"a":{"b":{"c":[1,2,{"d":true}]}}}\n```';
+    expect(extractJsonFromResponse(text)).toEqual({ a: { b: { c: [1, 2, { d: true }] } } });
+  });
+
+  test("extracts an array containing nested objects", () => {
+    expect(extractJsonFromResponse('```json\n[{"a":1},{"b":[2,3]}]\n```')).toEqual([
+      { a: 1 },
+      { b: [2, 3] },
+    ]);
+  });
+
+  test("handles strings containing backslash-escaped quotes", () => {
+    expect(extractJsonFromResponse('{"q":"he said \\"hi\\""}')).toEqual({ q: 'he said "hi"' });
+  });
+
+  test("handles strings containing backslash followed by brace", () => {
+    expect(extractJsonFromResponse('{"q":"path\\\\with\\\\braces}"}')).toEqual({
+      q: "path\\with\\braces}",
+    });
+  });
+
+  test("when fence and bare JSON both exist, the fence wins", () => {
+    // The fence is the model's intentional output; bare JSON in prose may
+    // be quoted from input. Verify fence takes precedence.
+    const text = "Background: {\"old\":true}\n\n```json\n{\"new\":true}\n```";
+    expect(extractJsonFromResponse(text)).toEqual({ new: true });
+  });
+
+  test("when multiple bare JSON blocks exist, picks the FIRST one", () => {
+    const text = '{"first":1} other text {"second":2}';
+    expect(extractJsonFromResponse(text)).toEqual({ first: 1 });
+  });
+
+  test("supports unicode characters inside string values", () => {
+    expect(extractJsonFromResponse('{"name":"日本語 🚀"}')).toEqual({ name: "日本語 🚀" });
+  });
+
+  test("ignores braces inside fenced blocks that come AFTER the JSON one", () => {
+    // Common pattern: the model outputs json then prose with a code block.
+    // The first fence is what we want — extractJsonFromResponse returns it.
+    const text = '```json\n{"ok":true}\n```\n\nNotes: see ```{example}```';
+    expect(extractJsonFromResponse(text)).toEqual({ ok: true });
+  });
+});
+
+describe("runStructured: validation-failure retry path", () => {
+  test("retries when extraction succeeds but the schema rejects the result", async () => {
+    // This is distinct from a parse failure: JSON came through fine, but
+    // the model didn't include a required field. We must feed back the
+    // schema reason and retry, not silently succeed with bad data.
+    let calls = 0;
+    const result = await runStructured("Q", {
+      schema: { type: "object", required: ["name", "role"] },
+      retries: 2,
+      runner: async (prompt) => {
+        calls += 1;
+        if (calls === 1) return '```json\n{"name":"Alice"}\n```';
+        // After feedback, the model adds the missing field.
+        expect(prompt).toContain("PREVIOUS ATTEMPT FAILED");
+        expect(prompt.toLowerCase()).toContain("role");
+        return '```json\n{"name":"Alice","role":"CEO"}\n```';
+      },
+    });
+    expect(calls).toBe(2);
+    expect(result.parsed).toEqual({ name: "Alice", role: "CEO" });
+    expect(result.attempts[0].error).toContain("role");
+    expect(result.attempts[1].error).toBeNull();
+  });
 });
 
 describe("buildStructuredInstructions", () => {

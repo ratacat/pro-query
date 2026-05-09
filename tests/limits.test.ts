@@ -128,4 +128,85 @@ describe("extractLimitsProgress", () => {
     expect(observations).toHaveLength(1);
     expect(observations[0].feature_name).toBe("ok");
   });
+
+  test("dedupes by feature_name keeping the FIRST occurrence (regression guard)", () => {
+    // Behavior matters: agent-facing counters should reflect the upstream
+    // event order. If a refactor flipped to last-wins, downstream display
+    // would show stale numbers from earlier events.
+    const event = {
+      type: "conversation_detail_metadata",
+      limits_progress: [
+        { feature_name: "deep_research", remaining: 250, reset_after: "early" },
+        { feature_name: "deep_research", remaining: 100, reset_after: "later" },
+      ],
+    };
+    const observations = extractLimitsProgress(event);
+    expect(observations).toHaveLength(1);
+    // First wins:
+    expect(observations[0].remaining).toBe(250);
+    expect(observations[0].reset_after).toBe("early");
+  });
+
+  test("normalizes a missing reset_after to null (callers can store null in SQLite)", () => {
+    // The persistence layer is `reset_after TEXT` which accepts null but not
+    // undefined. extractLimitsProgress must coerce.
+    const event = {
+      type: "conversation_detail_metadata",
+      limits_progress: [{ feature_name: "ok", remaining: 5 }],
+    };
+    expect(extractLimitsProgress(event)[0].reset_after).toBeNull();
+  });
+});
+
+describe("summarizeAccountResponse: edge cases", () => {
+  test("falls back to default when account_ordering points at a non-existent uuid", async () => {
+    // Catches a regression where the stale ordering slug would crash or
+    // return empty rather than degrading gracefully.
+    const body = JSON.stringify({
+      accounts: {
+        default: {
+          account: { plan_type: "free" },
+          features: ["base"],
+          entitlement: { has_active_subscription: false, subscription_plan: null },
+        },
+      },
+      account_ordering: ["uuid-missing-from-accounts"],
+    });
+    const summary = summarizeAccountResponse(body);
+    // Either falls back to default (preferred) or the only non-default key
+    // (none here). With only 'default', it should land on default.
+    expect(summary.planType).toBe("free");
+  });
+
+  test("will_renew=false is preserved verbatim", async () => {
+    const body = JSON.stringify({
+      accounts: {
+        default: {
+          account: { plan_type: "pro" },
+          features: ["pro"],
+          entitlement: { has_active_subscription: true, subscription_plan: "chatgptpro" },
+          last_active_subscription: { will_renew: false },
+        },
+      },
+      account_ordering: [],
+    });
+    const summary = summarizeAccountResponse(body);
+    expect(summary.willRenew).toBe(false);
+  });
+
+  test("will_renew with non-boolean type becomes null (defensive)", async () => {
+    const body = JSON.stringify({
+      accounts: {
+        default: {
+          account: { plan_type: "pro" },
+          features: [],
+          entitlement: { has_active_subscription: true },
+          last_active_subscription: { will_renew: "yes" }, // wrong shape
+        },
+      },
+      account_ordering: [],
+    });
+    const summary = summarizeAccountResponse(body);
+    expect(summary.willRenew).toBeNull();
+  });
 });
