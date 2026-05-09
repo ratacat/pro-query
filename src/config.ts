@@ -26,10 +26,14 @@ export function resolveHome(env: Record<string, string | undefined>): string {
   return expandPath(env.PRO_CLI_HOME ?? DEFAULT_HOME);
 }
 
-export async function migrateLegacyDefaultHome(env: Record<string, string | undefined>): Promise<void> {
+export async function migrateLegacyDefaultHome(
+  env: Record<string, string | undefined>,
+  homedirOverride?: string,
+): Promise<void> {
   if (env.PRO_CLI_HOME) return;
-  const nextHome = expandPath(DEFAULT_HOME);
-  const legacyHome = expandPath(LEGACY_HOME);
+  const baseHome = homedirOverride ?? homedir();
+  const nextHome = join(baseHome, ".pro-cli");
+  const legacyHome = join(baseHome, ".pro");
   if (await pathExists(nextHome)) {
     await rewriteMigratedConfigPaths(nextHome, legacyHome);
     return;
