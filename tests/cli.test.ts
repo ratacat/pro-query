@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runCli } from "../src/app";
+import { EXIT, ProError } from "../src/errors";
 import { JobStore } from "../src/jobs";
 
 const originalFetch = globalThis.fetch;
@@ -511,6 +512,107 @@ describe("robot-mode CLI", () => {
     });
   });
 
+  test("job create --wait reports terminal failed jobs as top-level JSON errors", async () => {
+    await withHome(async (home) => {
+      try {
+        const result = await run(["job", "create", "hello", "--wait", "--json", "--wait-timeout", "5000"], {
+          tty: true,
+          home,
+        });
+
+        expect(result.code).toBe(EXIT.auth);
+        expect(result.stdout).toBe("");
+        const payload = JSON.parse(result.stderr);
+        expect(payload.ok).toBe(false);
+        expect(payload.error.code).toBe("SESSION_TOKEN_MISSING");
+        expect(payload.error.details.jobStatus).toBe("failed");
+        expect(payload.error.details.job.id).toMatch(/^job_/);
+        expect(payload.error.details.waited.wait.status).toBe("failed");
+      } finally {
+        await run(["daemon", "stop", "--json"], { tty: true, home });
+      }
+    });
+  });
+
+  test("job wait reports terminal failed jobs as top-level JSON errors", async () => {
+    await withHome(async (home) => {
+      const store = await JobStore.open(join(home, "jobs.sqlite"));
+      let jobId = "";
+      try {
+        const created = store.create({
+          prompt: "hello",
+          model: "gpt-5-5-pro",
+          reasoning: "standard",
+          options: {},
+        });
+        jobId = created.id;
+        store.markRunning(jobId);
+        store.markFailed(
+          jobId,
+          new ProError("CHATGPT_PROBE_FAILED", "Could not determine ChatGPT login state from the CDP page (HTTP 431).", {
+            exitCode: EXIT.auth,
+            suggestions: ["HTTP 431 indicates oversize request headers."],
+            details: { status: 431 },
+          }),
+        );
+      } finally {
+        store.close();
+      }
+
+      try {
+        const result = await run(["job", "wait", jobId, "--json"], { tty: true, home });
+
+        expect(result.code).toBe(EXIT.auth);
+        expect(result.stdout).toBe("");
+        const payload = JSON.parse(result.stderr);
+        expect(payload.ok).toBe(false);
+        expect(payload.error.code).toBe("CHATGPT_PROBE_FAILED");
+        expect(payload.error.message).toContain("HTTP 431");
+        expect(payload.error.suggestions).toContain("HTTP 431 indicates oversize request headers.");
+        expect(payload.error.details.status).toBe(431);
+        expect(payload.error.details.jobStatus).toBe("failed");
+        expect(payload.error.details.job.id).toBe(jobId);
+        expect(payload.error.details.waited.wait.status).toBe("failed");
+      } finally {
+        await run(["daemon", "stop", "--json"], { tty: true, home });
+      }
+    });
+  });
+
+  test("job wait soft timeout remains top-level success for non-terminal jobs", async () => {
+    await withHome(async (home) => {
+      const store = await JobStore.open(join(home, "jobs.sqlite"));
+      let jobId = "";
+      try {
+        const created = store.create({
+          prompt: "hello",
+          model: "gpt-5-5-pro",
+          reasoning: "standard",
+          options: {},
+        });
+        jobId = created.id;
+        store.markRunning(jobId);
+      } finally {
+        store.close();
+      }
+
+      try {
+        const result = await run(["job", "wait", jobId, "--soft-timeout", "1", "--poll-ms", "25", "--json"], {
+          tty: true,
+          home,
+        });
+
+        expect(result.code).toBe(0);
+        const payload = JSON.parse(result.stdout);
+        expect(payload.ok).toBe(true);
+        expect(payload.data.job.status).toBe("running");
+        expect(payload.data.wait.timedOut).toBe(true);
+      } finally {
+        await run(["daemon", "stop", "--json"], { tty: true, home });
+      }
+    });
+  });
+
   test("job result includes relay guidance for agents", async () => {
     await withHome(async (home) => {
       const store = await JobStore.open(join(home, "jobs.sqlite"));
@@ -572,6 +674,35 @@ describe("robot-mode CLI", () => {
       }, () => {
         navigated = true;
       });
+
+      const result = await run(["ask", "hello", "--json", "--timeout", "10"], { tty: true, home });
+
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout).data.result).toBe("OK");
+      expect(deleted).toBe(1);
+      expect(navigated).toBe(true);
+    });
+  });
+
+  test("ask recovers once from HTTP 431 auth-probe cookie bloat", async () => {
+    await withHome(async (home) => {
+      await writeSessionToken(home);
+      let deleted = 0;
+      let navigated = false;
+      installCookieBloatRecoveryCdp(
+        () => {
+          deleted += 1;
+        },
+        () => {
+          navigated = true;
+        },
+        {
+          ok: false,
+          status: 431,
+          code: "CHATGPT_PROBE_FAILED",
+          body: "ChatGPT auth session probe returned HTTP 431.",
+        },
+      );
 
       const result = await run(["ask", "hello", "--json", "--timeout", "10"], { tty: true, home });
 
@@ -1015,7 +1146,16 @@ function installFakeCdpValue(value: unknown, onExpression?: (expression: string)
   globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 }
 
-function installCookieBloatRecoveryCdp(onDelete: () => void, onNavigate: () => void): void {
+function installCookieBloatRecoveryCdp(
+  onDelete: () => void,
+  onNavigate: () => void,
+  firstEvaluation: Record<string, unknown> = {
+    ok: false,
+    status: 0,
+    code: "CHATGPT_PAGE_MISSING",
+    body: "Expected https://chatgpt.com, got chrome-error://chromewebdata/",
+  },
+): void {
   globalThis.fetch = (async (url: string | URL | Request) => {
     const target = String(url);
     if (target.endsWith("/json")) {
@@ -1051,12 +1191,7 @@ function installCookieBloatRecoveryCdp(onDelete: () => void, onNavigate: () => v
             result: {
               value:
                 runtimeEvaluations === 1
-                  ? {
-                      ok: false,
-                      status: 0,
-                      code: "CHATGPT_PAGE_MISSING",
-                      body: "Expected https://chatgpt.com, got chrome-error://chromewebdata/",
-                    }
+                  ? firstEvaluation
                   : { ok: true, status: 200, body: conversationStream("OK") },
             },
           },

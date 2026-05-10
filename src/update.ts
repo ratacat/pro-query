@@ -22,9 +22,15 @@ export interface UpdateResult {
   steps: UpdateStep[];
 }
 
-export function updateProCli(): UpdateResult {
-  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const origin = run("git", ["-C", repoRoot, "remote", "get-url", "origin"]).output.trim();
+export interface UpdateOptions {
+  repoRoot?: string;
+  runCommand?: (command: string, args: string[], cwd?: string) => UpdateStep;
+}
+
+export function updateProCli(options: UpdateOptions = {}): UpdateResult {
+  const repoRoot = options.repoRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const runCommand = options.runCommand ?? run;
+  const origin = runCommand("git", ["-C", repoRoot, "remote", "get-url", "origin"]).output.trim();
   if (!ALLOWED_ORIGINS.has(origin)) {
     throw new ProError("UPDATE_WRONG_ORIGIN", `Refusing to update checkout with origin ${origin}.`, {
       exitCode: EXIT.invalidArgs,
@@ -32,7 +38,7 @@ export function updateProCli(): UpdateResult {
     });
   }
 
-  const branch = run("git", ["-C", repoRoot, "branch", "--show-current"]).output.trim();
+  const branch = runCommand("git", ["-C", repoRoot, "branch", "--show-current"]).output.trim();
   if (!branch) {
     throw new ProError("UPDATE_DETACHED_HEAD", "Refusing to update a detached checkout.", {
       exitCode: EXIT.invalidArgs,
@@ -46,7 +52,7 @@ export function updateProCli(): UpdateResult {
     });
   }
 
-  const dirty = run("git", ["-C", repoRoot, "status", "--porcelain"]).output.trim();
+  const dirty = runCommand("git", ["-C", repoRoot, "status", "--porcelain"]).output.trim();
   if (dirty) {
     throw new ProError("UPDATE_DIRTY_WORKTREE", "Refusing to update with uncommitted changes.", {
       exitCode: EXIT.invalidArgs,
@@ -55,11 +61,12 @@ export function updateProCli(): UpdateResult {
   }
 
   const steps = [
-    run("git", ["-C", repoRoot, "pull", "--ff-only", "origin", "main"]),
-    run("bun", ["install"], repoRoot),
-    run("bun", ["link"], repoRoot),
+    runCommand("git", ["-C", repoRoot, "pull", "--ff-only", "origin", "main"]),
+    runCommand("bun", ["install"], repoRoot),
+    runCommand("bun", ["link"], repoRoot),
+    runCommand("pro-cli", ["daemon", "restart", "--json"]),
   ];
-  const version = run("pro-cli", ["--version"]).output.trim();
+  const version = runCommand("pro-cli", ["--version"]).output.trim();
 
   return { repoRoot, branch, version, steps };
 }

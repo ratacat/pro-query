@@ -338,6 +338,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
                 waitOptions.pollMs,
                 waitOptions.softTimeout,
               );
+              throwIfTerminalJobFailure(waited, jobId);
               writeSuccess(io, mode, {
                 ...waited,
                 ...(await resultIfSucceeded(daemon.client, jobId, waited)),
@@ -394,16 +395,14 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           if (!jobId) throw invalidArgs("Missing job id.", ["Use pro-cli job wait <job-id>."]);
           const waitOptions = parseWaitOptions(parsed.flags);
           const daemon = await ensureDaemonRunning(paths, io);
-          writeSuccess(
-            io,
-            mode,
-            await daemon.client.wait(
-              jobId,
-              waitOptions.timeoutMs,
-              waitOptions.pollMs,
-              waitOptions.softTimeout,
-            ),
+          const waited = await daemon.client.wait(
+            jobId,
+            waitOptions.timeoutMs,
+            waitOptions.pollMs,
+            waitOptions.softTimeout,
           );
+          throwIfTerminalJobFailure(waited, jobId);
+          writeSuccess(io, mode, waited);
           return EXIT.success;
         }
         if (subcommand === "cancel") {
@@ -993,6 +992,73 @@ function jobIdFromPayload(payload: Record<string, unknown>): string {
     exitCode: EXIT.internal,
     suggestions: ["Run pro-cli daemon restart --json and retry."],
   });
+}
+
+function throwIfTerminalJobFailure(payload: Record<string, unknown>, fallbackJobId: string): void {
+  const job = payload.job;
+  if (!isRecord(job)) return;
+  const status = typeof job.status === "string" ? job.status : "";
+  if (status !== "failed" && status !== "cancelled") return;
+
+  const parsed = parseJobErrorPayload(job.error);
+  const code = stringValue(parsed.code) ?? (status === "cancelled" ? "JOB_CANCELLED" : "JOB_FAILED");
+  const jobId = stringValue(job.id) ?? fallbackJobId;
+  const message = stringValue(parsed.message) ?? `Job ${jobId} ${status}.`;
+  const details = isRecord(parsed.details) ? parsed.details : {};
+  throw new ProError(code, message, {
+    exitCode: exitCodeForJobFailure(code, status),
+    suggestions: stringArray(parsed.suggestions),
+    details: {
+      ...details,
+      jobId,
+      jobStatus: status,
+      job,
+      waited: payload,
+    },
+  });
+}
+
+function parseJobErrorPayload(raw: unknown): Record<string, unknown> {
+  if (isRecord(raw)) return raw;
+  if (typeof raw !== "string" || raw.trim().length === 0) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isRecord(parsed) ? parsed : { message: raw };
+  } catch {
+    return { message: raw };
+  }
+}
+
+function exitCodeForJobFailure(code: string, status: string): (typeof EXIT)[keyof typeof EXIT] {
+  if (status === "cancelled") return EXIT.upstream;
+  if (
+    [
+      "ACCOUNT_ID_MISSING",
+      "CDP_EVALUATION_FAILED",
+      "CDP_UNAVAILABLE",
+      "CHATGPT_PAGE_LOGGED_OUT",
+      "CHATGPT_PAGE_MISSING",
+      "CHATGPT_PROBE_FAILED",
+      "SESSION_TOKEN_EXPIRED",
+      "SESSION_TOKEN_MISSING",
+    ].includes(code)
+  ) {
+    return EXIT.auth;
+  }
+  if (code === "NETWORK_ERROR") return EXIT.network;
+  if (code === "WAIT_TIMEOUT") return EXIT.timeout;
+  if (code === "INVALID_ARGS" || code === "INVALID_JSON") return EXIT.invalidArgs;
+  if (code === "JOB_NOT_FOUND" || code === "JOB_NOT_READY") return EXIT.notFound;
+  if (code === "INTERNAL_ERROR" || code === "DAEMON_BAD_RESPONSE") return EXIT.internal;
+  return EXIT.upstream;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 async function resultIfSucceeded(
